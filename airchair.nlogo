@@ -35,13 +35,15 @@ to setup
   set t 0.0
   set t_0 2 ^ 32
   set tracks table:make
+
+  ;; TODO: Load map parameters from file.
   set map-resolution 0.1
   set map-x0 -60.0
   set map-y0 -40.0
 
   ;; Load track statistics.
   file-close-all
-  file-open (word "atc-" dataset "-tracks.csv")
+  file-open (word "data/tracks/atc-" dataset "-tracks.csv")
   while [ not file-at-end? ] [
     let row csv:from-row file-read-line
 
@@ -54,10 +56,10 @@ to setup
 
   ;; Open the dataset CSV file to run the simulation.
   file-close-all
-  file-open (word "atc-" dataset ".csv")
+  file-open (word "data/tracks/atc-" dataset ".csv")
 
   ;; Import the occupancy map.
-  import-pcolors "map.jpg"
+  import-pcolors "data/map.jpg"
 
   reset-ticks
 end
@@ -81,11 +83,11 @@ to iterate
   ]
 
   let track-t_n (item 2 track)
-  let track-reach (item 3 track) * 0.001
+  let track-reach (item 3 track)
   let guide? (item 4 track)
 
   ifelse guide? [
-    if track-reach >= min-track-reach [
+    if min-track-reach <= track-reach and track-reach <= max-track-reach [
       update-guide row track-t_n
     ]
   ] [
@@ -119,11 +121,12 @@ to update-guide [row track-t_n]
 
   ;; If the agentset is empty the previous block will have been skipped.
   if not any? selected-guide [
+    clear-drawing
     create-guides 1 [
       set id track-id
       set t_n track-t_n
-      set color (15 + 10 * (random 13))
-      set size 20
+      set color red
+      set size 10
 
       setxy track-x track-y
       set heading to-heading track-o
@@ -151,8 +154,8 @@ to update-pedestrians [row track-t_n]
     create-pedestrians 1 [
       set id track-id
       set t_n track-t_n
-      set color 5
-      set size 20
+      set color blue
+      set size 10
     ]
   ]
 
@@ -282,28 +285,43 @@ t_hours
 11
 
 CHOOSER
+10
 20
-30
-158
-75
+195
+65
 dataset
 dataset
-"20121114" "20121024" "20121028" "20121031" "20121104" "20121107" "20121111" "20121118" "20121121" "20121125"
+"20121024" "20121028" "20121031" "20121104" "20121107" "20121111" "20121114" "20121118" "20121121" "20121125"
 0
 
 SLIDER
-20
-80
-192
-113
+10
+70
+195
+103
 min-track-reach
 min-track-reach
 0
-300
-35.0
+100
+25.0
 1
 1
-NIL
+m
+HORIZONTAL
+
+SLIDER
+10
+110
+195
+143
+max-track-reach
+max-track-reach
+0
+100
+100.0
+1
+1
+m
 HORIZONTAL
 
 @#$#@#$#@
