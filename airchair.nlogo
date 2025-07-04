@@ -5,34 +5,103 @@ extensions [
 ]
 
 globals [
-  t
+  ;; Simulation clock, stores the current global timestamp.
+  clock
+
+  ;; Initial simulation time.
   t_0
+
+  ;; Time passed since the start of the simulation in hours.
   t_hours
+
+  ;; Metadata for person tracks.
   tracks
+
+  ;; Map resolution in meters.
   map-resolution
+
+  ;; Position of the map's bottom-left pixel relative to
+  ;; the origin of the map coordinate frame, in meters.
   map-x0
   map-y0
+
+  ;; Number of reported obstacle / wheelchair collisions.
+  obstacle-collisions
+
+  ;; Number of reported pedestrian / wheelchair collisions.
+  pedestrian-collisions
 ]
 
 breed [pedestrians pedestrian]
 
 pedestrians-own [
+  ;; Pedestrian's track ID.
   id
+
+  ;; Timestamp of the last track record for this pedestrian.
   t_n
 ]
 
 breed [guides guide]
 
 guides-own [
-  id
+  ;; Timestamp of the last guide state update.
+  t
+
+  ;; Timestamp of the last track record for this guide.
   t_n
-  pen-color
+
+  ;; Guide's track ID.
+  id
+
+  ;; Guide position in the map coordinate frame, in meters.
+  x-coordinate
+  y-coordinate
+
+  ;; Guide orientation relative to the map coordinate frame, in radians.
+  ;; Follows robotics conventions: values increase counter-clockwise, the
+  ;; range is between [-pi, pi), and the origin points Right.
+  orientation
+
+  ;; Guide linear speed in meters per second.
+  linear-speed
+
+  ;; Guide angular speed in radians per second.
+  angular-speed
+]
+
+breed [wheelchairs wheelchair]
+
+wheelchairs-own [
+  ;; Timestamp of the last state update.
+  t
+
+  ;; Timestamp of the last track record for this wheelchair's guide.
+  t_n
+
+  ;; The human guide or wheelchair followed by this wheelchair.
+  target
+
+  ;; Wheelchair position in the map coordinate frame, in meters.
+  x-coordinate
+  y-coordinate
+
+  ;; Wheelchair orientation relative to the map coordinate frame, in radians.
+  ;; Follows robotics conventions: values increase counter-clockwise, the
+  ;; range is between [-pi, pi), and the origin points Right.
+  orientation
+
+  ;; Wheelchair linear speed in meters per second.
+  linear-speed
+
+  ;; Wheelchair angular speed in radians per second.
+  angular-speed
 ]
 
 to setup
   clear-all
 
-  set t 0.0
+  set clock 0.0
   set t_0 2 ^ 32
   set tracks table:make
 
@@ -74,9 +143,16 @@ end
 
 to iterate
   let row csv:from-row file-read-line
-  set t (item 0 row)
   let track-id (item 1 row)
 
+  ;; Update the simulation clock, taking notice if the time changed.
+  let now (item 0 row)
+  let ticked? (now != clock)
+  set clock now
+
+  set t_hours (clock - t_0) / 3600
+
+  ;; Retrieve the metadata for this record, skipping it if not found.
   let track table:get-or-default tracks track-id nobody
   if track = nobody [
     stop
@@ -87,7 +163,7 @@ to iterate
   let guide? (item 4 track)
 
   ifelse guide? [
-    if min-track-reach <= track-reach and track-reach <= max-track-reach [
+    if min-guide-reach <= track-reach and track-reach <= max-guide-reach [
       update-guide row track-t_n
     ]
   ] [
@@ -100,40 +176,120 @@ to iterate
   ]
 
   ;; Iterate over agents of all breeds, killing off expired instances.
-  ask turtles with [t_n <= t] [
+  ask turtles with [t_n <= clock] [
     die
   ]
 
-  tick
+  ;; Update the tick count only if the simulation clock moved.
+  if ticked? [
+    tick
+  ]
 end
 
-to update-guide [row track-t_n]
-  let track-id item 1 row
-  let track-x (to-world-x (item 2 row))
-  let track-y (to-world-y (item 3 row))
-  let track-o item 6 row
+to update-guide [row guide-t_n]
+  let guide-id (item 1 row)
+  let convoy-guide (get-guide guide-id)
 
-  let selected-guide (guides with [id = track-id])
-  ask selected-guide [
-    setxy track-x track-y
-    set heading to-heading track-o
-  ]
-
-  ;; If the agentset is empty the previous block will have been skipped.
-  if not any? selected-guide [
+  if convoy-guide = nobody [
     clear-drawing
     create-guides 1 [
-      set id track-id
-      set t_n track-t_n
+      set convoy-guide self
+      set t_n guide-t_n
+      set id guide-id
       set color red
       set size 10
 
-      setxy track-x track-y
-      set heading to-heading track-o
+      set-state row
       pen-down
     ]
+
+    create-convoy convoy-guide
+
+    stop
   ]
 
+  ask convoy-guide [
+    set-state row
+
+    update-convoy convoy-guide
+  ]
+end
+
+;; Create a convoy of wheelchairs behind a guide.
+to create-convoy [convoy-guide]
+  let wheelchair-target convoy-guide
+
+  create-wheelchairs wheelchair-count [
+    set target wheelchair-target
+    set color green
+    set size 10
+
+    set t [t] of target
+    set t_n [t_n] of target
+    set orientation [orientation] of target
+    set x-coordinate ([x-coordinate] of target) - cos (to-degrees orientation)
+    set y-coordinate ([y-coordinate] of target) - sin (to-degrees orientation)
+    set linear-speed [linear-speed] of target
+
+    setxy (to-world-x x-coordinate) (to-world-y y-coordinate)
+    set heading (to-heading orientation)
+
+    ;; Set this wheelchair as the target for the next one.
+    set wheelchair-target self
+  ]
+end
+
+;; Update the position of the wheelchairs.
+to update-convoy [convoy-guide]
+  let wheelchair-target convoy-guide
+
+  repeat wheelchair-count [
+    ask wheelchairs with [target = wheelchair-target] [
+      let target-xcor ([xcor] of target)
+      let target-ycor ([ycor] of target)
+
+      let xcor-offset target-xcor - xcor
+      let ycor-offset target-ycor - ycor
+
+      set heading atan xcor-offset ycor-offset
+
+      ;; Revert sin / cos since heading's origin is Up instead of Right.
+      set xcor target-xcor - (1.0 / map-resolution) * (sin heading)
+      set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
+
+      if any? patches in-radius (collision-threshold / map-resolution) with [pcolor < 2] [
+        set obstacle-collisions (obstacle-collisions + 1)
+      ]
+
+      if any? other turtles in-radius (collision-threshold / map-resolution) [
+        set pedestrian-collisions (pedestrian-collisions + 1)
+      ]
+
+      ;; Set this wheelchair as the search key for the next one.
+      set wheelchair-target self
+    ]
+  ]
+end
+
+;; Set the state of a guide.
+to set-state [row]
+  let track-x (item 2 row) * 0.001
+  let track-y (item 3 row) * 0.001
+  let track-v (item 5 row) * 0.001
+  let track-o (item 6 row)
+
+  if t != 0 [
+    set angular-speed (track-o - orientation) / (clock - t)
+  ]
+
+  set t clock
+  set x-coordinate track-x
+  set y-coordinate track-y
+  set orientation track-o
+  set linear-speed track-v
+
+  setxy (to-world-x track-x) (to-world-y track-y)
+  set heading to-heading track-o
 end
 
 to update-pedestrians [row track-t_n]
@@ -142,14 +298,12 @@ to update-pedestrians [row track-t_n]
     stop
   ]
 
-  let track-id item 1 row
-  let track-x ((item 2 row) * 0.001 - map-x0) / map-resolution
-  let track-y ((item 3 row) * 0.001 - map-y0) / map-resolution
-  let track-o item 6 row
+  let track-id (item 1 row)
+  let track-x (item 2 row) * 0.001
+  let track-y (item 3 row) * 0.001
+  let track-o (item 6 row)
 
-  set t_hours (t - t_0) / 3600
-
-  ;; Add the person to the simulation if they're not already included.
+  ;; Add the pedestrian to the simulation if they're not already included.
   if not any? pedestrians with [id = track-id] [
     create-pedestrians 1 [
       set id track-id
@@ -160,14 +314,18 @@ to update-pedestrians [row track-t_n]
   ]
 
   ask pedestrians with [id = track-id] [
-    ;; If the pedestrian's position lies outside the map, remove them from the simulation.
-    carefully [
-      setxy track-x track-y
-      set heading to-heading track-o
-    ] [
-      die
-    ]
+    setxy (to-world-x track-x) (to-world-y track-y)
+    set heading to-heading track-o
   ]
+end
+
+to-report get-guide [guide-id]
+  let selected-guide (guides with [id = guide-id])
+  if not any? selected-guide [
+    report nobody
+  ]
+
+  report (item 0 (sort selected-guide))
 end
 
 to-report to-world-x [map-x]
@@ -179,10 +337,14 @@ to-report to-world-y [map-y]
 end
 
 to-report to-world-coordinate [map-k map-k0 world-last]
-  let world-k (map-k * 0.001 - map-k0) / map-resolution
+  let world-k (map-k - map-k0) / map-resolution
   set world-k max (list world-k 0)
   set world-k min (list world-k world-last)
   report world-k
+end
+
+to-report to-degrees [radians]
+  report 180.0 * radians / pi
 end
 
 to-report to-heading [direction]
@@ -259,7 +421,7 @@ PLOT
 905
 30
 1265
-280
+150
 Pedestrians
 Time (h)
 Count
@@ -271,7 +433,7 @@ true
 false
 "" ""
 PENS
-"default" 1.0 0 -16777216 true "" "plotxy t_hours count turtles\nif t_hours >= 1.0 [\n  ; scroll the range of the plot so\n  ; only the last 200 ticks are visible\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
+"default" 1.0 0 -16777216 true "" "plotxy t_hours count pedestrians\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
 
 MONITOR
 755
@@ -299,8 +461,8 @@ SLIDER
 70
 195
 103
-min-track-reach
-min-track-reach
+min-guide-reach
+min-guide-reach
 0
 100
 25.0
@@ -314,8 +476,8 @@ SLIDER
 110
 195
 143
-max-track-reach
-max-track-reach
+max-guide-reach
+max-guide-reach
 0
 100
 100.0
@@ -323,6 +485,56 @@ max-track-reach
 1
 m
 HORIZONTAL
+
+SLIDER
+10
+410
+195
+443
+wheelchair-count
+wheelchair-count
+1
+4
+2.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+10
+450
+195
+483
+collision-threshold
+collision-threshold
+0.1
+1.0
+0.3
+0.1
+1
+NIL
+HORIZONTAL
+
+PLOT
+905
+155
+1265
+320
+Collisions
+Time (h)
+Collisions
+0.0
+1.0
+0.0
+10.0
+true
+false
+"" ""
+PENS
+"obstacles" 1.0 0 -13345367 true "" "plotxy t_hours obstacle-collisions\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
+"pedestrians" 1.0 0 -2674135 true "" "plotxy t_hours pedestrian-collisions\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
+"total" 1.0 0 -16777216 true "" "plotxy t_hours (obstacle-collisions + pedestrian-collisions)\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
 
 @#$#@#$#@
 ## WHAT IS IT?
