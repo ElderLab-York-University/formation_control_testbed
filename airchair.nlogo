@@ -32,7 +32,7 @@ globals [
   pedestrian-collisions
 
   ;; Anonymous function used to update convoy wheelchairs.
-  update-convoy
+  update-convoy-method
 ]
 
 breed [pedestrians pedestrian]
@@ -133,7 +133,7 @@ to setup
   ;; Import the occupancy map.
   import-pcolors "data/map.gif"
 
-  set update-convoy (ifelse-value
+  set update-convoy-method (ifelse-value
     method = "naive"
       [[[convoy-guide] -> update-convoy-naive convoy-guide]]
     ; method = "APF"
@@ -200,7 +200,7 @@ to update-guide [row guide-t_n]
   let guide-id (item 1 row)
   let convoy-guide (get-guide guide-id)
 
-  if convoy-guide = nobody [
+  ifelse convoy-guide = nobody [
     clear-drawing
     create-guides 1 [
       set convoy-guide self
@@ -212,16 +212,36 @@ to update-guide [row guide-t_n]
       set-state row
       pen-down
     ]
+  ] [
+    ask convoy-guide [
+      set-state row
+    ]
+  ]
 
+  update-convoy convoy-guide
+end
+
+to update-convoy [convoy-guide]
+  ;; If there is no convoy associated to this guide, create it.
+  if not any? wheelchairs with [target = convoy-guide] [
     create-convoy convoy-guide
+  ]
 
+  ;; If the convoy is clear, update wheelchair poses.
+  if not collision? [
+    (run update-convoy-method convoy-guide)
     stop
   ]
 
-  ask convoy-guide [
-    set-state row
-
-    (run update-convoy convoy-guide)
+  ;; If a collision was detected, delete the convoy.
+  ;; This prevents spamming the collision count when wheelchairs get stuck.
+  ;; The convoy will be re-created in the next iteration.
+  let wheelchair-target convoy-guide
+  repeat wheelchair-count [
+    ask wheelchairs with [target = wheelchair-target] [
+      set wheelchair-target self
+      die
+    ]
   ]
 end
 
@@ -234,22 +254,35 @@ to create-convoy [convoy-guide]
     set color green
     set size 10
 
-    set t [t] of target
     set t_n [t_n] of target
-    set orientation [orientation] of target
-    set x-coordinate ([x-coordinate] of target) - cos (to-degrees orientation)
-    set y-coordinate ([y-coordinate] of target) - sin (to-degrees orientation)
-    set linear-speed [linear-speed] of target
 
-    setxy (to-world-x x-coordinate) (to-world-y y-coordinate)
-    set heading (to-heading orientation)
+    ;; Set wheelchair position and heading to sensible start values.
+    ;; This will be overwritten by the update function after all wheelchairs are created.
+    set heading ([heading] of target)
+    set xcor ([xcor] of target) - (1.0 / map-resolution) * (sin heading)
+    set ycor ([ycor] of target) - (1.0 / map-resolution) * (cos heading)
 
     ;; Set this wheelchair as the target for the next one.
     set wheelchair-target self
   ]
 end
 
-;; Update the position of the wheelchairs.
+;; Report if any of the convoy wheelchairs have collided with an obstacle or pedestrian.
+to-report collision?
+  let collision-found? false
+  ask wheelchairs [
+    set collision-found? (
+      collision-found? or
+      (any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0]) or
+      (any? other turtles in-radius (collision-threshold / map-resolution))
+    )
+  ]
+
+  report collision-found?
+end
+
+;; Update the position of the wheelchairs using a naive algorithm.
+;; The wheelchairs simply follow the guide without avoiding anything in their way.
 to update-convoy-naive [convoy-guide]
   let wheelchair-target convoy-guide
 
@@ -281,8 +314,7 @@ to update-convoy-naive [convoy-guide]
   ]
 end
 
-;; Update the position of the wheelchairs using
-;; Artificial Potential Fields (APF) to avoid obstacles.
+;; Update the position of the wheelchairs using Artificial Potential Fields (APF) to avoid obstacles.
 to update-convoy-apf [convoy-guide]
   let wheelchair-target convoy-guide
 
@@ -676,7 +708,7 @@ CHOOSER
 method
 method
 "naive" "APF"
-1
+0
 
 @#$#@#$#@
 ## WHAT IS IT?
