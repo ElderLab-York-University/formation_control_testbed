@@ -30,6 +30,9 @@ globals [
 
   ;; Number of reported pedestrian / wheelchair collisions.
   pedestrian-collisions
+
+  ;; Anonymous function used to update convoy wheelchairs.
+  update-convoy
 ]
 
 breed [pedestrians pedestrian]
@@ -128,7 +131,14 @@ to setup
   file-open (word "data/tracks/atc-" dataset ".csv")
 
   ;; Import the occupancy map.
-  import-pcolors "data/map.jpg"
+  import-pcolors "data/map.gif"
+
+  set update-convoy (ifelse-value
+    method = "naive"
+      [[[convoy-guide] -> update-convoy-naive convoy-guide]]
+    ; method = "APF"
+      [[[convoy-guide] -> update-convoy-apf convoy-guide]]
+  )
 
   reset-ticks
 end
@@ -211,7 +221,7 @@ to update-guide [row guide-t_n]
   ask convoy-guide [
     set-state row
 
-    update-convoy convoy-guide
+    (run update-convoy convoy-guide)
   ]
 end
 
@@ -240,7 +250,7 @@ to create-convoy [convoy-guide]
 end
 
 ;; Update the position of the wheelchairs.
-to update-convoy [convoy-guide]
+to update-convoy-naive [convoy-guide]
   let wheelchair-target convoy-guide
 
   repeat wheelchair-count [
@@ -257,7 +267,7 @@ to update-convoy [convoy-guide]
       set xcor target-xcor - (1.0 / map-resolution) * (sin heading)
       set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
 
-      if any? patches in-radius (collision-threshold / map-resolution) with [pcolor < 2] [
+      if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
         set obstacle-collisions (obstacle-collisions + 1)
       ]
 
@@ -269,6 +279,83 @@ to update-convoy [convoy-guide]
       set wheelchair-target self
     ]
   ]
+end
+
+;; Update the position of the wheelchairs using
+;; Artificial Potential Fields (APF) to avoid obstacles.
+to update-convoy-apf [convoy-guide]
+  let wheelchair-target convoy-guide
+
+  repeat wheelchair-count [
+    ask wheelchairs with [target = wheelchair-target] [
+      let target-xcor ([xcor] of target)
+      let target-ycor ([ycor] of target)
+      let vector (attraction-vector target-xcor target-ycor)
+
+      let wheelchair-x ([xcor] of self)
+      let wheelchair-y ([ycor] of self)
+
+      let nearby (other turtles in-radius (collision-far / map-resolution))
+      ask nearby [
+        set vector (map + vector (repulsion-vector wheelchair-x wheelchair-y xcor ycor))
+      ]
+
+      let neighborhood (patches in-radius (collision-far / map-resolution) with [pcolor = 0])
+      ask neighborhood [
+        set vector (map + vector (repulsion-vector wheelchair-x wheelchair-y pxcor pycor))
+      ]
+
+      let scale (collision-far / map-resolution) / (1 + (count neighborhood) + (count nearby))
+
+      let xcor-offset (item 0 vector) * scale
+      let ycor-offset (item 1 vector) * scale
+
+      set heading atan xcor-offset ycor-offset
+
+      ;; Revert sin / cos since heading's origin is Up instead of Right.
+      carefully [
+        ;;set xcor target-xcor - (1.0 / map-resolution) * (sin heading)
+        ;;set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
+        set xcor xcor + xcor-offset
+        set ycor ycor + ycor-offset
+      ] [
+        ;; Nothing to do.
+      ]
+
+      if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
+        set obstacle-collisions (obstacle-collisions + 1)
+      ]
+
+      if any? other turtles in-radius (collision-threshold / map-resolution) [
+        set pedestrian-collisions (pedestrian-collisions + 1)
+      ]
+
+      ;; Set this wheelchair as the search key for the next one.
+      set wheelchair-target self
+    ]
+  ]
+end
+
+to-report attraction-vector [target-xcor target-ycor]
+  ;; Normalize vector by sensor range.
+  let x (target-xcor - xcor) * (map-resolution / collision-far)
+  let y (target-ycor - ycor) * (map-resolution / collision-far)
+  let d (sqrt (x ^ 2 + y ^ 2))
+
+  let f attraction-gain * d
+
+  report (list (x * f) (y * f))
+end
+
+to-report repulsion-vector [wheelchair-x wheelchair-y obstacle-x obstacle-y]
+  ;; Normalize vector by sensor range.
+  let x (wheelchair-x - obstacle-x) * (map-resolution / collision-far)
+  let y (wheelchair-y - obstacle-y) * (map-resolution / collision-far)
+  let d (sqrt (x ^ 2 + y ^ 2))
+
+  let f collision-gain * ((1.0 / d) - 1.0) / (d ^ 3)
+
+  report (list (x * f) (y * f))
 end
 
 ;; Set the state of a guide.
@@ -377,8 +464,8 @@ GRAPHICS-WINDOW
 1400
 0
 600
-0
-0
+1
+1
 1
 ticks
 30.0
@@ -495,7 +582,7 @@ wheelchair-count
 wheelchair-count
 1
 4
-2.0
+3.0
 1
 1
 NIL
@@ -535,6 +622,61 @@ PENS
 "obstacles" 1.0 0 -13345367 true "" "plotxy t_hours obstacle-collisions\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
 "pedestrians" 1.0 0 -2674135 true "" "plotxy t_hours pedestrian-collisions\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
 "total" 1.0 0 -16777216 true "" "plotxy t_hours (obstacle-collisions + pedestrian-collisions)\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
+
+SLIDER
+10
+490
+195
+523
+collision-far
+collision-far
+0.1
+2.0
+1.0
+0.1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+10
+530
+195
+563
+collision-gain
+collision-gain
+0.1
+10
+0.2
+0.1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+10
+570
+195
+603
+attraction-gain
+attraction-gain
+0.01
+10.0
+0.01
+0.01
+1
+NIL
+HORIZONTAL
+
+CHOOSER
+10
+360
+195
+405
+method
+method
+"naive" "APF"
+1
 
 @#$#@#$#@
 ## WHAT IS IT?
