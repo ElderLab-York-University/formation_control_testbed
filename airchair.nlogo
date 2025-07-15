@@ -1,21 +1,32 @@
 extensions [
   csv
-  py
-  table
+  pathdir
 ]
 
 globals [
+  ;; List of track CSV files.
+  track-files
+
+  ;; Path to the current track's input dataset CSV file.
+  path-track
+
+  ;; ID of the dataset from which the current track was taken.
+  dataset-id
+
+  ;; ID of the guide in the current track file.
+  guide-id
+
+  ;; Path to the output collisions report CSV file.
+  path-collisions
+
   ;; Simulation clock, stores the current global timestamp.
   clock
 
   ;; Initial simulation time.
   t_0
 
-  ;; Time passed since the start of the simulation in hours.
-  t_hours
-
-  ;; Metadata for person tracks.
-  tracks
+  ;; Time passed since the start of the simulation in seconds.
+  t_passed
 
   ;; Map resolution in meters.
   map-resolution
@@ -40,9 +51,6 @@ breed [pedestrians pedestrian]
 pedestrians-own [
   ;; Pedestrian's track ID.
   id
-
-  ;; Timestamp of the last track record for this pedestrian.
-  t_n
 ]
 
 breed [guides guide]
@@ -51,11 +59,11 @@ guides-own [
   ;; Timestamp of the last guide state update.
   t
 
-  ;; Timestamp of the last track record for this guide.
-  t_n
-
   ;; Guide's track ID.
   id
+
+  ;; Number of collisions reported during this guide's trip.
+  collisions
 
   ;; Guide position in the map coordinate frame, in meters.
   x-coordinate
@@ -79,9 +87,6 @@ wheelchairs-own [
   ;; Timestamp of the last state update.
   t
 
-  ;; Timestamp of the last track record for this wheelchair's guide.
-  t_n
-
   ;; The human guide or wheelchair followed by this wheelchair.
   target
 
@@ -103,32 +108,34 @@ wheelchairs-own [
 
 to setup
   clear-all
+  file-close-all
 
-  set clock 0.0
-  set t_0 2 ^ 32
-  set tracks table:make
+  ifelse all-tracks? [
+    set track-files (pathdir:list "data/tracks")
+    let track-file (first track-files)
+    parse-track-path track-file
+
+    set path-track (word "data/tracks/" track-file)
+    set track-files (remove-item 0 track-files)
+  ] [
+    set track-files []
+    set path-track user-file
+    parse-track-path path-track
+  ]
+
+  ;; Interrupt the setup if the initial track path wasn't set.
+  if path-track = False [
+    stop
+  ]
+
+  set path-collisions (word "data/collisions-" method ".csv")
+
+  set clock false
 
   ;; TODO: Load map parameters from file.
   set map-resolution 0.1
   set map-x0 -60.0
   set map-y0 -40.0
-
-  ;; Load track statistics.
-  file-close-all
-  file-open (word "data/tracks/atc-" dataset "-tracks.csv")
-  while [ not file-at-end? ] [
-    let row csv:from-row file-read-line
-
-    let track-id item 0 row
-    let track-t_0 item 1 row
-
-    table:put tracks track-id row
-    set t_0 min (list t_0 track-t_0)
-  ]
-
-  ;; Open the dataset CSV file to run the simulation.
-  file-close-all
-  file-open (word "data/tracks/atc-" dataset ".csv")
 
   ;; Import the occupancy map.
   import-pcolors "data/map.gif"
@@ -140,11 +147,16 @@ to setup
       [[[convoy-guide] -> update-convoy-apf convoy-guide]]
   )
 
+  set obstacle-collisions 0
+  set pedestrian-collisions 0
+
   reset-ticks
 end
 
 to go
+  file-open path-track
   if file-at-end? [
+    file-close-all
     stop
   ]
 
@@ -154,57 +166,69 @@ end
 to iterate
   let row csv:from-row file-read-line
   let track-id (item 1 row)
+  let track-last? ((item 6 row) = "Y")
 
   ;; Update the simulation clock, taking notice if the time changed.
   let now (item 0 row)
-  let ticked? (now != clock)
+  ifelse clock = false [
+    set t_0 now
+    set t_passed 0.0
+  ] [
+    set t_passed (clock - t_0)
+  ]
+
+  let ticked? (clock != now)
   set clock now
 
-  set t_hours (clock - t_0) / 3600
-
-  ;; Retrieve the metadata for this record, skipping it if not found.
-  let track table:get-or-default tracks track-id nobody
-  if track = nobody [
-    stop
-  ]
-
-  let track-t_n (item 2 track)
-  let track-reach (item 3 track)
-  let guide? (item 4 track)
-
-  ifelse guide? [
-    if min-guide-reach <= track-reach and track-reach <= max-guide-reach [
-      update-guide row track-t_n
-    ]
+  ifelse track-id = guide-id [
+    update-guide row
   ] [
-    update-pedestrians row track-t_n
+    update-pedestrians row
   ]
 
-  ;; Skip this iteration if no guide is present.
-  if not any? guides [
-    stop
-  ]
-
-  ;; Iterate over agents of all breeds, killing off expired instances.
-  ask turtles with [t_n <= clock] [
-    die
+  ;; Remove the pedestrian if we recahed the end of its track.
+  if track-last? [
+    ask pedestrians with [id = track-id] [
+      die
+    ]
   ]
 
   ;; Update the tick count only if the simulation clock moved.
   if ticked? [
     tick
   ]
+
+  if file-at-end? [
+    ;; Record the guide's collision count.
+    ask guides [
+      file-open path-collisions
+      file-print (word dataset-id "," id "," collisions)
+    ]
+
+    if (length track-files) > 0 [
+      set path-track (word "data/tracks/" (first track-files))
+      set track-files (remove-item 0 track-files)
+      parse-track-path path-track
+
+      set clock false
+      set obstacle-collisions 0
+      set pedestrian-collisions 0
+      clear-all-plots
+      clear-drawing
+    ]
+
+    ask turtles [
+      die
+    ]
+  ]
 end
 
-to update-guide [row guide-t_n]
-  let guide-id (item 1 row)
-  let convoy-guide (get-guide guide-id)
+to update-guide [row]
+  let convoy-guide get-guide
 
   ifelse convoy-guide = nobody [
-    clear-drawing
     create-guides 1 [
       set convoy-guide self
-      set t_n guide-t_n
       set id guide-id
       set color red
       set size 10
@@ -254,8 +278,6 @@ to create-convoy [convoy-guide]
     set color green
     set size 10
 
-    set t_n [t_n] of target
-
     ;; Set wheelchair position and heading to sensible start values.
     ;; This will be overwritten by the update function after all wheelchairs are created.
     set heading ([heading] of target)
@@ -302,10 +324,16 @@ to update-convoy-naive [convoy-guide]
 
       if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
         set obstacle-collisions (obstacle-collisions + 1)
+        ask convoy-guide [
+          set collisions (collisions + 1)
+        ]
       ]
 
       if any? other turtles in-radius (collision-threshold / map-resolution) [
         set pedestrian-collisions (pedestrian-collisions + 1)
+        ask convoy-guide [
+          set collisions (collisions + 1)
+        ]
       ]
 
       ;; Set this wheelchair as the search key for the next one.
@@ -356,10 +384,16 @@ to update-convoy-apf [convoy-guide]
 
       if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
         set obstacle-collisions (obstacle-collisions + 1)
+        ask convoy-guide [
+          set collisions (collisions + 1)
+        ]
       ]
 
       if any? other turtles in-radius (collision-threshold / map-resolution) [
         set pedestrian-collisions (pedestrian-collisions + 1)
+        ask convoy-guide [
+          set collisions (collisions + 1)
+        ]
       ]
 
       ;; Set this wheelchair as the search key for the next one.
@@ -392,10 +426,10 @@ end
 
 ;; Set the state of a guide.
 to set-state [row]
-  let track-x (item 2 row) * 0.001
-  let track-y (item 3 row) * 0.001
-  let track-v (item 5 row) * 0.001
-  let track-o (item 6 row)
+  let track-x (item 2 row)
+  let track-y (item 3 row)
+  let track-v (item 4 row)
+  let track-o (item 5 row)
 
   if t != 0 [
     set angular-speed (track-o - orientation) / (clock - t)
@@ -411,22 +445,21 @@ to set-state [row]
   set heading to-heading track-o
 end
 
-to update-pedestrians [row track-t_n]
+to update-pedestrians [row]
   ;; Ignore the record if no guide is set.
   if not any? guides [
     stop
   ]
 
   let track-id (item 1 row)
-  let track-x (item 2 row) * 0.001
-  let track-y (item 3 row) * 0.001
-  let track-o (item 6 row)
+  let track-x (item 2 row)
+  let track-y (item 3 row)
+  let track-o (item 5 row)
 
   ;; Add the pedestrian to the simulation if they're not already included.
   if not any? pedestrians with [id = track-id] [
     create-pedestrians 1 [
       set id track-id
-      set t_n track-t_n
       set color blue
       set size 10
     ]
@@ -438,7 +471,7 @@ to update-pedestrians [row track-t_n]
   ]
 end
 
-to-report get-guide [guide-id]
+to-report get-guide
   let selected-guide (guides with [id = guide-id])
   if not any? selected-guide [
     report nobody
@@ -472,6 +505,29 @@ to-report to-heading [direction]
     report 450.0 + angle
   ] [
     report 90.0 + angle
+  ]
+end
+
+;; Parse a track path to extract the dataset and guide ID's
+to parse-track-path [track-path]
+  if track-path = false [
+    stop
+  ]
+
+  let track-name track-path
+  let separator pathdir:get-separator
+  loop [
+    let index (position separator track-name)
+    ifelse index = false [
+      let index-ext (position "." track-name)
+      set dataset-id (substring track-name 4 12)
+      set guide-id (read-from-string (substring track-name 13 index-ext))
+      stop
+    ] [
+      let index-start (index + 1)
+      let index-end (length track-name)
+      set track-name (substring track-name index-start index-end)
+    ]
   ]
 end
 @#$#@#$#@
@@ -539,77 +595,26 @@ NIL
 PLOT
 905
 30
-1265
+1232
 150
 Pedestrians
 Time (h)
 Count
 0.0
-1.0
+60.0
 0.0
 10.0
 true
 false
 "" ""
 PENS
-"default" 1.0 0 -16777216 true "" "plotxy t_hours count pedestrians\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
-
-MONITOR
-755
-70
-902
-115
-Time (h)
-t_hours
-2
-1
-11
-
-CHOOSER
-10
-20
-195
-65
-dataset
-dataset
-"20121024" "20121028" "20121031" "20121104" "20121107" "20121111" "20121114" "20121118" "20121121" "20121125"
-0
+"default" 60.0 0 -16777216 true "" "plotxy t_passed count pedestrians\nif t_passed >= 60.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_passed - 60.0) 2 precision t_passed 2\n]"
 
 SLIDER
 10
-70
+120
 195
-103
-min-guide-reach
-min-guide-reach
-0
-100
-25.0
-1
-1
-m
-HORIZONTAL
-
-SLIDER
-10
-110
-195
-143
-max-guide-reach
-max-guide-reach
-0
-100
-100.0
-1
-1
-m
-HORIZONTAL
-
-SLIDER
-10
-410
-195
-443
+153
 wheelchair-count
 wheelchair-count
 1
@@ -622,9 +627,9 @@ HORIZONTAL
 
 SLIDER
 10
-450
+320
 195
-483
+353
 collision-threshold
 collision-threshold
 0.1
@@ -636,30 +641,30 @@ NIL
 HORIZONTAL
 
 PLOT
-905
-155
-1265
-320
+906
+156
+1232
+322
 Collisions
-Time (h)
+Time (s)
 Collisions
 0.0
-1.0
+60.0
 0.0
 10.0
 true
 false
 "" ""
 PENS
-"obstacles" 1.0 0 -13345367 true "" "plotxy t_hours obstacle-collisions\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
-"pedestrians" 1.0 0 -2674135 true "" "plotxy t_hours pedestrian-collisions\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
-"total" 1.0 0 -16777216 true "" "plotxy t_hours (obstacle-collisions + pedestrian-collisions)\nif t_hours >= 1.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 hour worth of points is visible.\n  set-plot-x-range precision (t_hours - 1.0) 2 precision t_hours 2\n]"
+"obstacles" 60.0 0 -13345367 true "" "plotxy t_passed obstacle-collisions\nif t_passed >= 60.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 minute worth of points is visible.\n  set-plot-x-range precision (t_passed - 60.0) 2 precision t_passed 2\n]"
+"pedestrians" 60.0 0 -2674135 true "" "plotxy t_passed pedestrian-collisions\nif t_passed >= 60.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 minute worth of points is visible.\n  set-plot-x-range precision (t_passed - 60.0) 2 precision t_passed 2\n]"
+"total" 1.0 0 -16777216 true "" "plotxy t_passed (obstacle-collisions + pedestrian-collisions)\nif t_passed >= 60.0 [\n  ; Scroll the range of the plot so only the\n  ; last 1 minute worth of points is visible.\n  set-plot-x-range precision (t_passed - 60.0) 2 precision t_passed 2\n]"
 
 SLIDER
 10
-490
+360
 195
-523
+393
 collision-far
 collision-far
 0.1
@@ -672,9 +677,9 @@ HORIZONTAL
 
 SLIDER
 10
-530
+400
 195
-563
+433
 collision-gain
 collision-gain
 0.1
@@ -687,14 +692,14 @@ HORIZONTAL
 
 SLIDER
 10
-570
+440
 195
-603
+473
 attraction-gain
 attraction-gain
 0.01
 10.0
-0.01
+0.1
 0.01
 1
 NIL
@@ -702,13 +707,35 @@ HORIZONTAL
 
 CHOOSER
 10
-360
+70
 195
-405
+115
 method
 method
 "naive" "APF"
 0
+
+SWITCH
+10
+30
+137
+63
+all-tracks?
+all-tracks?
+0
+1
+-1000
+
+MONITOR
+755
+75
+895
+120
+Guide ID
+guide-id
+17
+1
+11
 
 @#$#@#$#@
 ## WHAT IS IT?
