@@ -35,11 +35,14 @@ globals [
   map-x0
   map-y0
 
-  ;; Number of reported obstacle / wheelchair collisions.
+  ;; Number of per-guide obstacle / wheelchair collisions.
   obstacle-collisions
 
-  ;; Number of reported pedestrian / wheelchair collisions.
+  ;; Number of per-guide pedestrian / wheelchair collisions.
   pedestrian-collisions
+
+  ;; Total collisions across all guides.
+  all-collisions
 
   ;; Anonymous function used to update convoy wheelchairs.
   update-convoy-method
@@ -151,6 +154,7 @@ to setup
       [[[convoy-guide] -> update-convoy-apf convoy-guide]]
   )
 
+  set all-collisions 0
   set obstacle-collisions 0
   set pedestrian-collisions 0
 
@@ -416,6 +420,7 @@ to update-collision-count [convoy-guide]
 
     ask follower [
       if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
+        set all-collisions (all-collisions + 1)
         set obstacle-collisions (obstacle-collisions + 1)
         ask convoy-guide [
           set collisions (collisions + 1)
@@ -423,6 +428,7 @@ to update-collision-count [convoy-guide]
       ]
 
       if any? other turtles in-radius (collision-threshold / map-resolution) [
+        set all-collisions (all-collisions + 1)
         set pedestrian-collisions (pedestrian-collisions + 1)
         ask convoy-guide [
           set collisions (collisions + 1)
@@ -655,8 +661,8 @@ PLOT
 30
 1232
 150
-Pedestrians
-Time (h)
+Pedestrians (per-guide)
+Time (s)
 Count
 0.0
 60.0
@@ -703,7 +709,7 @@ PLOT
 156
 1232
 322
-Collisions
+Collisions (per-guide)
 Time (s)
 Collisions
 0.0
@@ -755,10 +761,10 @@ SLIDER
 473
 attraction-gain
 attraction-gain
-0.01
+0.1
 10.0
 0.1
-0.01
+0.1
 1
 NIL
 HORIZONTAL
@@ -771,7 +777,7 @@ CHOOSER
 method
 method
 "naive" "APF"
-0
+1
 
 SWITCH
 10
@@ -791,6 +797,17 @@ MONITOR
 120
 Guide ID
 guide-id
+17
+1
+11
+
+MONITOR
+717
+129
+897
+175
+Total Collisions (all guides)
+all-collisions
 17
 1
 11
