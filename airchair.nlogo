@@ -86,9 +86,6 @@ wheelchairs-own [
   ;; Timestamp of the last state update.
   t
 
-  ;; The human guide or wheelchair followed by this wheelchair.
-  target
-
   ;; Wheelchair position in the map coordinate frame, in meters.
   x-coordinate
   y-coordinate
@@ -324,7 +321,7 @@ end
 ;; Update the state of the simulated wheelchair convoy.
 to update-convoy [convoy-guide]
   ;; If there is no convoy associated to this guide, create it.
-  if not any? wheelchairs with [target = convoy-guide] [
+  if not any? [out-link-neighbors] of convoy-guide [
     create-convoy convoy-guide
   ]
 
@@ -335,26 +332,38 @@ to update-convoy [convoy-guide]
     stop
   ]
 
-  ;; If a collision was detected at creation time, delete the convoy.
+  ;; If a collision was detected before the update, delete the convoy.
   ;; This prevents spamming the collision count when wheelchairs get stuck.
   ;; The convoy will be re-created after the guide moves to its next pose.
-  let wheelchair-target convoy-guide
-  repeat wheelchair-count [
-    ask wheelchairs with [target = wheelchair-target] [
-      set wheelchair-target self
+  let follower (one-of [out-link-neighbors] of convoy-guide)
+  loop [
+    ;; Links are removed as soon as the turtle on either side dies, so we
+    ;; have to find the next wheelchair before removing the current one.
+    let following follower
+    set follower (one-of [out-link-neighbors] of following)
+
+    ask following [
       die
+    ]
+
+    if follower = nobody [
+      stop
     ]
   ]
 end
 
 ;; Create a convoy of wheelchairs behind a guide.
 to create-convoy [convoy-guide]
-  let wheelchair-target convoy-guide
+  let target convoy-guide
 
   create-wheelchairs wheelchair-count [
-    set target wheelchair-target
     set color green
     set size 10
+
+    create-link-from target [
+      set color black
+      set thickness 2
+    ]
 
     ;; Set wheelchair position and heading to sensible start values.
     ;; This will be overwritten by the update function after all wheelchairs are created.
@@ -363,17 +372,17 @@ to create-convoy [convoy-guide]
     set ycor ([ycor] of target) - (1.0 / map-resolution) * (cos heading)
 
     ;; Set this wheelchair as the target for the next one.
-    set wheelchair-target self
+    set target self
   ]
 end
 
 ;; Report if any of the convoy wheelchairs have collided with an obstacle or pedestrian.
 to-report collision? [convoy-guide]
-  let wheelchair-target convoy-guide
+  let target convoy-guide
 
   loop [
     ;; This assumes that any guide / wheelchair has at most one follower.
-    let follower (one-of wheelchairs with [target = wheelchair-target])
+    let follower (one-of [out-link-neighbors] of target)
     if follower = nobody [
       report false
     ]
@@ -386,7 +395,7 @@ to-report collision? [convoy-guide]
       )
 
       ;; Set this wheelchair as the search key for the next one.
-      set wheelchair-target self
+      set target self
     ]
 
     if collision-found? [
@@ -397,10 +406,10 @@ end
 
 ;; Update collision counts for the given guide's convoy.
 to update-collision-count [convoy-guide]
-  let wheelchair-target convoy-guide
+  let target convoy-guide
   loop [
     ;; This assumes that any guide / wheelchair has at most one follower.
-    let follower (one-of wheelchairs with [target = wheelchair-target])
+    let follower (one-of [out-link-neighbors] of target)
     if follower = nobody [
       stop
     ]
@@ -421,7 +430,7 @@ to update-collision-count [convoy-guide]
       ]
 
       ;; Set this wheelchair as the search key for the next one.
-      set wheelchair-target self
+      set target self
     ]
   ]
 end
@@ -429,10 +438,10 @@ end
 ;; Update the position of the wheelchairs using a naive algorithm.
 ;; The wheelchairs simply follow the guide without avoiding anything in their way.
 to update-convoy-naive [convoy-guide]
-  let wheelchair-target convoy-guide
+  let target convoy-guide
   loop [
     ;; This assumes that any guide / wheelchair has at most one follower.
-    let follower (one-of wheelchairs with [target = wheelchair-target])
+    let follower (one-of [out-link-neighbors] of target)
     if follower = nobody [
       stop
     ]
@@ -451,17 +460,17 @@ to update-convoy-naive [convoy-guide]
       set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
 
       ;; Set this wheelchair as the search key for the next one.
-      set wheelchair-target self
+      set target self
     ]
   ]
 end
 
 ;; Update the position of the wheelchairs using Artificial Potential Fields (APF) to avoid obstacles.
 to update-convoy-apf [convoy-guide]
-  let wheelchair-target convoy-guide
+  let target convoy-guide
   loop [
     ;; This assumes that any guide / wheelchair has at most one follower.
-    let follower (one-of wheelchairs with [target = wheelchair-target])
+    let follower (one-of [out-link-neighbors] of target)
     if follower = nobody [
       stop
     ]
@@ -499,7 +508,7 @@ to update-convoy-apf [convoy-guide]
       ]
 
       ;; Set this wheelchair as the search key for the next one.
-      set wheelchair-target self
+      set target self
     ]
   ]
 end
@@ -771,7 +780,7 @@ SWITCH
 63
 all-tracks?
 all-tracks?
-1
+0
 1
 -1000
 
