@@ -1,15 +1,8 @@
 extensions [
   csv
-  pathdir
 ]
 
 globals [
-  ;; List of track CSV files.
-  track-files
-
-  ;; Path to the current track's input dataset CSV file.
-  path-track
-
   ;; ID of the dataset from which the current track was taken.
   dataset-id
 
@@ -18,6 +11,12 @@ globals [
 
   ;; Path to the output collisions report CSV file.
   path-collisions
+
+  ;; Path to the current track's input dataset CSV file.
+  path-track
+
+  ;; List of pedestrian tracks.
+  tracks
 
   ;; Simulation clock, stores the current global timestamp.
   clock
@@ -106,29 +105,37 @@ wheelchairs-own [
   angular-speed
 ]
 
+;; Initialize the simulation.
 to setup
   clear-all
   file-close-all
 
-  ifelse all-tracks? [
-    set track-files (pathdir:list "data/tracks")
-    let track-file (first track-files)
-    parse-track-path track-file
+  set path-track false
+  set tracks []
 
-    set path-track (word "data/tracks/" track-file)
-    set track-files (remove-item 0 track-files)
+  ifelse all-tracks? [
+    file-open "data/tracks/all-tracks.csv"
+    while [not file-at-end?] [
+      let row csv:from-row file-read-line
+      set tracks (lput row tracks)
+    ]
+
+    update-track
   ] [
-    set track-files []
-    set path-track user-file
-    parse-track-path path-track
+    update-path-track
   ]
 
   ;; Interrupt the setup if the initial track path wasn't set.
-  if path-track = False [
+  if path-track = false [
     stop
   ]
 
   set path-collisions (word "data/collisions-" method ".csv")
+  carefully [
+    file-delete path-collisions
+  ] [
+    ;; Nothing to do.
+  ]
 
   set clock false
 
@@ -153,6 +160,7 @@ to setup
   reset-ticks
 end
 
+;; Run the simulation.
 to go
   file-open path-track
   if file-at-end? [
@@ -163,10 +171,9 @@ to go
   iterate
 end
 
+;; Perform one iteration step in the simulation.
 to iterate
   let row csv:from-row file-read-line
-  let track-id (item 1 row)
-  let track-last? ((item 6 row) = "Y")
 
   ;; Update the simulation clock, taking notice if the time changed.
   let now (item 0 row)
@@ -180,13 +187,16 @@ to iterate
   let ticked? (clock != now)
   set clock now
 
+  ;; Iterate a guide or pedestrian depending on the nature of the current track record.
+  let track-id (item 1 row)
   ifelse track-id = guide-id [
-    update-guide row
+    iterate-guide row
   ] [
-    update-pedestrians row
+    iterate-pedestrian row
   ]
 
-  ;; Remove the pedestrian if we recahed the end of its track.
+  ;; Remove the pedestrian if we reached the end of its track.
+  let track-last? ((item 6 row) = "Y")
   if track-last? [
     ask pedestrians with [id = track-id] [
       die
@@ -198,6 +208,7 @@ to iterate
     tick
   ]
 
+  ;; If we reached the end of the current track file...
   if file-at-end? [
     ;; Record the guide's collision count.
     ask guides [
@@ -205,17 +216,20 @@ to iterate
       file-print (word dataset-id "," id "," collisions)
     ]
 
-    if (length track-files) > 0 [
-      set path-track (word "data/tracks/" (first track-files))
-      set track-files (remove-item 0 track-files)
-      parse-track-path path-track
-
-      set clock false
-      set obstacle-collisions 0
-      set pedestrian-collisions 0
-      clear-all-plots
-      clear-drawing
+    ;; Stop here if no tracks left to play.
+    if (length tracks) = 0 [
+      stop
     ]
+
+    ;; Load the next track.
+    update-track
+
+    ;; Set up the environment for the next track.
+    set clock false
+    set obstacle-collisions 0
+    set pedestrian-collisions 0
+    clear-all-plots
+    clear-drawing
 
     ask turtles [
       die
@@ -223,9 +237,50 @@ to iterate
   ]
 end
 
-to update-guide [row]
-  let convoy-guide get-guide
+;; Load a track path from the filesystem.
+to update-path-track
+  ;; Ask the user to select a track file, aborting the operation if they refuse.
+  set path-track user-file
+  if path-track = false [
+    stop
+  ]
 
+  ;; Parse the track path to extract the dataset ID and guide ID.
+  let track-name path-track
+  let separator "/"
+  loop [
+    let index (position separator track-name)
+    ifelse index = false [
+      let index-ext (position "." track-name)
+      set dataset-id (substring track-name 4 12)
+      set guide-id (read-from-string (substring track-name 13 index-ext))
+      stop
+    ] [
+      let index-start (index + 1)
+      let index-end (length track-name)
+      set track-name (substring track-name index-start index-end)
+    ]
+  ]
+end
+
+;; Update the current track.
+to update-track
+  if (length tracks) = 0 [
+    stop
+  ]
+
+  let track (item 0 tracks)
+  set tracks (remove-item 0 tracks)
+
+  set dataset-id (item 0 track)
+  set guide-id (item 1 track)
+
+  set path-track (word "data/tracks/atc-" dataset-id "-" guide-id ".csv")
+end
+
+;; Iterate the simulated guide.
+to iterate-guide [row]
+  let convoy-guide (one-of guides with [id = guide-id])
   ifelse convoy-guide = nobody [
     create-guides 1 [
       set convoy-guide self
@@ -233,18 +288,40 @@ to update-guide [row]
       set color red
       set size 10
 
-      set-state row
+      update-guide row
       pen-down
     ]
   ] [
     ask convoy-guide [
-      set-state row
+      update-guide row
     ]
   ]
 
   update-convoy convoy-guide
 end
 
+;; Set the state of a guide.
+to update-guide [row]
+  let track-x (item 2 row)
+  let track-y (item 3 row)
+  let track-v (item 4 row)
+  let track-o (item 5 row)
+
+  if t != 0 [
+    set angular-speed (track-o - orientation) / (clock - t)
+  ]
+
+  set t clock
+  set x-coordinate track-x
+  set y-coordinate track-y
+  set orientation track-o
+  set linear-speed track-v
+
+  setxy (to-world-x track-x) (to-world-y track-y)
+  set heading to-heading track-o
+end
+
+;; Update the state of the simulated wheelchair convoy.
 to update-convoy [convoy-guide]
   ;; If there is no convoy associated to this guide, create it.
   if not any? wheelchairs with [target = convoy-guide] [
@@ -252,14 +329,15 @@ to update-convoy [convoy-guide]
   ]
 
   ;; If the convoy is clear, update wheelchair poses.
-  if not collision? [
+  if not collision? convoy-guide [
     (run update-convoy-method convoy-guide)
+    update-collision-count convoy-guide
     stop
   ]
 
-  ;; If a collision was detected, delete the convoy.
+  ;; If a collision was detected at creation time, delete the convoy.
   ;; This prevents spamming the collision count when wheelchairs get stuck.
-  ;; The convoy will be re-created in the next iteration.
+  ;; The convoy will be re-created after the guide moves to its next pose.
   let wheelchair-target convoy-guide
   repeat wheelchair-count [
     ask wheelchairs with [target = wheelchair-target] [
@@ -290,38 +368,44 @@ to create-convoy [convoy-guide]
 end
 
 ;; Report if any of the convoy wheelchairs have collided with an obstacle or pedestrian.
-to-report collision?
-  let collision-found? false
-  ask wheelchairs [
-    set collision-found? (
-      collision-found? or
-      (any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0]) or
-      (any? other turtles in-radius (collision-threshold / map-resolution))
-    )
-  ]
-
-  report collision-found?
-end
-
-;; Update the position of the wheelchairs using a naive algorithm.
-;; The wheelchairs simply follow the guide without avoiding anything in their way.
-to update-convoy-naive [convoy-guide]
+to-report collision? [convoy-guide]
   let wheelchair-target convoy-guide
 
-  repeat wheelchair-count [
-    ask wheelchairs with [target = wheelchair-target] [
-      let target-xcor ([xcor] of target)
-      let target-ycor ([ycor] of target)
+  loop [
+    ;; This assumes that any guide / wheelchair has at most one follower.
+    let follower (one-of wheelchairs with [target = wheelchair-target])
+    if follower = nobody [
+      report false
+    ]
 
-      let xcor-offset target-xcor - xcor
-      let ycor-offset target-ycor - ycor
+    let collision-found? false
+    ask follower [
+      set collision-found? (
+        (any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0]) or
+        (any? other turtles in-radius (collision-threshold / map-resolution))
+      )
 
-      set heading atan xcor-offset ycor-offset
+      ;; Set this wheelchair as the search key for the next one.
+      set wheelchair-target self
+    ]
 
-      ;; Revert sin / cos since heading's origin is Up instead of Right.
-      set xcor target-xcor - (1.0 / map-resolution) * (sin heading)
-      set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
+    if collision-found? [
+      report true
+    ]
+  ]
+end
 
+;; Update collision counts for the given guide's convoy.
+to update-collision-count [convoy-guide]
+  let wheelchair-target convoy-guide
+  loop [
+    ;; This assumes that any guide / wheelchair has at most one follower.
+    let follower (one-of wheelchairs with [target = wheelchair-target])
+    if follower = nobody [
+      stop
+    ]
+
+    ask follower [
       if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
         set obstacle-collisions (obstacle-collisions + 1)
         ask convoy-guide [
@@ -342,12 +426,47 @@ to update-convoy-naive [convoy-guide]
   ]
 end
 
+;; Update the position of the wheelchairs using a naive algorithm.
+;; The wheelchairs simply follow the guide without avoiding anything in their way.
+to update-convoy-naive [convoy-guide]
+  let wheelchair-target convoy-guide
+  loop [
+    ;; This assumes that any guide / wheelchair has at most one follower.
+    let follower (one-of wheelchairs with [target = wheelchair-target])
+    if follower = nobody [
+      stop
+    ]
+
+    ask follower [
+      let target-xcor ([xcor] of target)
+      let target-ycor ([ycor] of target)
+
+      let xcor-offset target-xcor - xcor
+      let ycor-offset target-ycor - ycor
+
+      set heading atan xcor-offset ycor-offset
+
+      ;; Revert sin / cos since heading's origin is Up instead of Right.
+      set xcor target-xcor - (1.0 / map-resolution) * (sin heading)
+      set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
+
+      ;; Set this wheelchair as the search key for the next one.
+      set wheelchair-target self
+    ]
+  ]
+end
+
 ;; Update the position of the wheelchairs using Artificial Potential Fields (APF) to avoid obstacles.
 to update-convoy-apf [convoy-guide]
   let wheelchair-target convoy-guide
+  loop [
+    ;; This assumes that any guide / wheelchair has at most one follower.
+    let follower (one-of wheelchairs with [target = wheelchair-target])
+    if follower = nobody [
+      stop
+    ]
 
-  repeat wheelchair-count [
-    ask wheelchairs with [target = wheelchair-target] [
+    ask follower [
       let target-xcor ([xcor] of target)
       let target-ycor ([ycor] of target)
       let vector (attraction-vector target-xcor target-ycor)
@@ -374,26 +493,9 @@ to update-convoy-apf [convoy-guide]
 
       ;; Revert sin / cos since heading's origin is Up instead of Right.
       carefully [
-        ;;set xcor target-xcor - (1.0 / map-resolution) * (sin heading)
-        ;;set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
-        set xcor xcor + xcor-offset
-        set ycor ycor + ycor-offset
+        setxy (xcor + xcor-offset) (ycor + ycor-offset)
       ] [
         ;; Nothing to do.
-      ]
-
-      if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
-        set obstacle-collisions (obstacle-collisions + 1)
-        ask convoy-guide [
-          set collisions (collisions + 1)
-        ]
-      ]
-
-      if any? other turtles in-radius (collision-threshold / map-resolution) [
-        set pedestrian-collisions (pedestrian-collisions + 1)
-        ask convoy-guide [
-          set collisions (collisions + 1)
-        ]
       ]
 
       ;; Set this wheelchair as the search key for the next one.
@@ -402,6 +504,7 @@ to update-convoy-apf [convoy-guide]
   ]
 end
 
+;; Compute the attraction vector leading a wheelchair to its target.
 to-report attraction-vector [target-xcor target-ycor]
   ;; Normalize vector by sensor range.
   let x (target-xcor - xcor) * (map-resolution / collision-far)
@@ -413,6 +516,7 @@ to-report attraction-vector [target-xcor target-ycor]
   report (list (x * f) (y * f))
 end
 
+;; Compute the repulsion vector leading a wheelchair away from an obstacle.
 to-report repulsion-vector [wheelchair-x wheelchair-y obstacle-x obstacle-y]
   ;; Normalize vector by sensor range.
   let x (wheelchair-x - obstacle-x) * (map-resolution / collision-far)
@@ -424,70 +528,41 @@ to-report repulsion-vector [wheelchair-x wheelchair-y obstacle-x obstacle-y]
   report (list (x * f) (y * f))
 end
 
-;; Set the state of a guide.
-to set-state [row]
-  let track-x (item 2 row)
-  let track-y (item 3 row)
-  let track-v (item 4 row)
-  let track-o (item 5 row)
-
-  if t != 0 [
-    set angular-speed (track-o - orientation) / (clock - t)
-  ]
-
-  set t clock
-  set x-coordinate track-x
-  set y-coordinate track-y
-  set orientation track-o
-  set linear-speed track-v
-
-  setxy (to-world-x track-x) (to-world-y track-y)
-  set heading to-heading track-o
-end
-
-to update-pedestrians [row]
-  ;; Ignore the record if no guide is set.
-  if not any? guides [
-    stop
-  ]
-
+;; Iterate a simulated pedestrian.
+to iterate-pedestrian [row]
   let track-id (item 1 row)
   let track-x (item 2 row)
   let track-y (item 3 row)
   let track-o (item 5 row)
 
   ;; Add the pedestrian to the simulation if they're not already included.
-  if not any? pedestrians with [id = track-id] [
+  let iterating (one-of pedestrians with [id = track-id])
+  if iterating = nobody [
     create-pedestrians 1 [
+      set iterating self
       set id track-id
       set color blue
       set size 10
     ]
   ]
 
-  ask pedestrians with [id = track-id] [
+  ask iterating [
     setxy (to-world-x track-x) (to-world-y track-y)
     set heading to-heading track-o
   ]
 end
 
-to-report get-guide
-  let selected-guide (guides with [id = guide-id])
-  if not any? selected-guide [
-    report nobody
-  ]
-
-  report (item 0 (sort selected-guide))
-end
-
+;; Convert the given map X coordinate to the NetLogo world frame of reference.
 to-report to-world-x [map-x]
   report to-world-coordinate map-x map-x0 (world-width - 1)
 end
 
+;; Convert the given map Y coordinate to the NetLogo world frame of reference.
 to-report to-world-y [map-y]
   report to-world-coordinate map-y map-y0 (world-height - 1)
 end
 
+;; Convert the given map coordinate to the NetLogo world frame of reference.
 to-report to-world-coordinate [map-k map-k0 world-last]
   let world-k (map-k - map-k0) / map-resolution
   set world-k max (list world-k 0)
@@ -495,39 +570,13 @@ to-report to-world-coordinate [map-k map-k0 world-last]
   report world-k
 end
 
-to-report to-degrees [radians]
-  report 180.0 * radians / pi
-end
-
+;; Convert an orientation from radians in map reference frame to degrees in NetLogo world frame.
 to-report to-heading [direction]
   let angle -180.0 * direction / pi
   ifelse angle < -90.0 [
     report 450.0 + angle
   ] [
     report 90.0 + angle
-  ]
-end
-
-;; Parse a track path to extract the dataset and guide ID's
-to parse-track-path [track-path]
-  if track-path = false [
-    stop
-  ]
-
-  let track-name track-path
-  let separator pathdir:get-separator
-  loop [
-    let index (position separator track-name)
-    ifelse index = false [
-      let index-ext (position "." track-name)
-      set dataset-id (substring track-name 4 12)
-      set guide-id (read-from-string (substring track-name 13 index-ext))
-      stop
-    ] [
-      let index-start (index + 1)
-      let index-end (length track-name)
-      set track-name (substring track-name index-start index-end)
-    ]
   ]
 end
 @#$#@#$#@
@@ -722,7 +771,7 @@ SWITCH
 63
 all-tracks?
 all-tracks?
-0
+1
 1
 -1000
 
