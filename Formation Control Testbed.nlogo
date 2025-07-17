@@ -906,7 +906,13 @@ Finally, on the top-right corner there are the `Setup` and `Go` buttons to contr
 
 ## THINGS TO NOTICE
 
+As the guide moves about the environment, its trajectory is plotted in the environment. This helps identifying difficult spots in the route.
+
+Links are used to bind each wheelchair to its leader. This makes it easier to identify the position of each wheelchair in the convoy.
+
 Wheelchairs are initially placed in a straight line behind the guide, one meter apart from each other. If a collision is detected at this point the wheelchairs are deleted and re-instantiated at the next iteration, after the guide has moved to its next position. This is repeated until the wheelchairs can be placed in their initial positions without collision. Additionally, if a collision is detected while the wheelchairs are moving, the convoy is also deleted and re-instantiated as above. The point of this procedure is to avoid spamming the collision count when wheelchairs get stuck into walls or chased by pedestrians.
+
+During execution, per-guide collision totals are written to the report file `collisions-<method>.csv`. These files are re-created before each session.
 
 ## THINGS TO TRY
 
