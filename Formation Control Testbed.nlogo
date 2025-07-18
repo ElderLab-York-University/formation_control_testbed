@@ -32,23 +32,12 @@
 
 extensions [
   csv
+  py
 ]
 
 globals [
-  ;; ID of the dataset from which the current track was taken.
-  dataset-id
-
   ;; ID of the guide in the current track file.
   guide-id
-
-  ;; Path to the output collisions report CSV file.
-  path-collisions
-
-  ;; Path to the current track's input dataset CSV file.
-  path-track
-
-  ;; List of pedestrian tracks.
-  tracks
 
   ;; Simulation clock, stores the current global timestamp.
   clock
@@ -142,34 +131,25 @@ to setup
   clear-all
   file-close-all
 
-  set path-track false
-  set tracks []
+  py:setup py:python3
+  py:run "from fct import datasets"
+  py:set "folder" "data/tracks"
+  py:set "method" method
+  py:set "reach" (list min-reach max-reach)
+  py:run "datasets.update(folder, method, reach)"
 
   ifelse all-tracks? [
-    file-open "data/tracks/all-tracks.csv"
-    while [not file-at-end?] [
-      let row csv:from-row file-read-line
-      set tracks (lput row tracks)
+    py:run "datasets.enqueue(folder)"
+  ] [
+    ;; Ask the user to select a track file, aborting the operation if they refuse.
+    let path-dataset user-file
+    if path-dataset = false [
+      stop
     ]
 
-    update-track
-  ] [
-    update-path-track
+    py:set "path_dataset" path-dataset
+    py:run "datasets.open(path_dataset)"
   ]
-
-  ;; Interrupt the setup if the initial track path wasn't set.
-  if path-track = false [
-    stop
-  ]
-
-  set path-collisions (word "data/collisions-" method ".csv")
-  carefully [
-    file-delete path-collisions
-  ] [
-    ;; Nothing to do.
-  ]
-
-  set clock false
 
   ;; TODO: Load map parameters from file.
   set map-resolution 0.1
@@ -186,51 +166,71 @@ to setup
       [[[convoy-guide] -> update-convoy-apf convoy-guide]]
   )
 
+  set clock false
   set all-collisions 0
-  set obstacle-collisions 0
-  set pedestrian-collisions 0
 
   reset-ticks
 end
 
 ;; Run the simulation.
 to go
-  file-open path-track
-  if file-at-end? [
-    file-close-all
+  carefully [
+    iterate
+  ] [
+    print error-message
     stop
   ]
-
-  iterate
 end
 
 ;; Perform one iteration step in the simulation.
 to iterate
-  let row csv:from-row file-read-line
+  let row py:runresult "next(datasets)"
+  if row = nobody [
+    ;; Record the guide's collision count.
+    ask guides [
+      py:set "record" (list id collisions)
+      py:run "datasets.recordCollisions(*record)"
+    ]
 
-  ;; Update the simulation clock, taking notice if the time changed.
+    ;; Set up the environment for the next track.
+    set clock false
+
+    ask turtles [
+      die
+    ]
+
+    stop
+  ]
+
+  ;; Reset the environment for a new guide.
   let now (item 0 row)
   ifelse clock = false [
     set t_0 now
     set t_passed 0.0
+    set obstacle-collisions 0
+    set pedestrian-collisions 0
+    clear-all-plots
+    clear-drawing
   ] [
     set t_passed (clock - t_0)
   ]
 
+  ;; Update the simulation clock, taking notice if the time changed.
   let ticked? (clock != now)
   set clock now
 
   ;; Iterate a guide or pedestrian depending on the nature of the current track record.
-  let track-id (item 1 row)
-  ifelse track-id = guide-id [
+  let guide? (item 6 row)
+  ifelse guide? [
     iterate-guide row
   ] [
     iterate-pedestrian row
   ]
 
   ;; Remove the pedestrian if we reached the end of its track.
-  let track-last? ((item 6 row) = "Y")
-  if track-last? [
+  let track-id (item 1 row)
+  let last? (item 7 row)
+  if last? [
     ask pedestrians with [id = track-id] [
       die
     ]
@@ -240,79 +240,11 @@ to iterate
   if ticked? [
     tick
   ]
-
-  ;; If we reached the end of the current track file...
-  if file-at-end? [
-    ;; Record the guide's collision count.
-    ask guides [
-      file-open path-collisions
-      file-print (word dataset-id "," id "," collisions)
-    ]
-
-    ;; Stop here if no tracks left to play.
-    if (length tracks) = 0 [
-      stop
-    ]
-
-    ;; Load the next track.
-    update-track
-
-    ;; Set up the environment for the next track.
-    set clock false
-    set obstacle-collisions 0
-    set pedestrian-collisions 0
-    clear-all-plots
-    clear-drawing
-
-    ask turtles [
-      die
-    ]
-  ]
-end
-
-;; Load a track path from the filesystem.
-to update-path-track
-  ;; Ask the user to select a track file, aborting the operation if they refuse.
-  set path-track user-file
-  if path-track = false [
-    stop
-  ]
-
-  ;; Parse the track path to extract the dataset ID and guide ID.
-  let track-name path-track
-  let separator "/"
-  loop [
-    let index (position separator track-name)
-    ifelse index = false [
-      let index-ext (position "." track-name)
-      set dataset-id (substring track-name 4 12)
-      set guide-id (read-from-string (substring track-name 13 index-ext))
-      stop
-    ] [
-      let index-start (index + 1)
-      let index-end (length track-name)
-      set track-name (substring track-name index-start index-end)
-    ]
-  ]
-end
-
-;; Update the current track.
-to update-track
-  if (length tracks) = 0 [
-    stop
-  ]
-
-  let track (item 0 tracks)
-  set tracks (remove-item 0 tracks)
-
-  set dataset-id (item 0 track)
-  set guide-id (item 1 track)
-
-  set path-track (word "data/tracks/atc-" dataset-id "-" guide-id ".csv")
 end
 
 ;; Iterate the simulated guide.
 to iterate-guide [row]
+  set guide-id (item 1 row)
   let convoy-guide (one-of guides with [id = guide-id])
   ifelse convoy-guide = nobody [
     create-guides 1 [
@@ -733,7 +665,7 @@ collision-threshold
 0.3
 0.1
 1
-NIL
+m
 HORIZONTAL
 
 PLOT
@@ -768,7 +700,7 @@ sensor-range
 1.0
 0.1
 1
-NIL
+m
 HORIZONTAL
 
 SLIDER
@@ -844,6 +776,36 @@ all-collisions
 1
 11
 
+SLIDER
+10
+160
+195
+193
+min-reach
+min-reach
+0.0
+100.0
+70.0
+1.0
+1
+m
+HORIZONTAL
+
+SLIDER
+10
+200
+195
+233
+max-reach
+max-reach
+0.0
+100.0
+100.0
+1.0
+1
+m
+HORIZONTAL
+
 @#$#@#$#@
 ## WHAT IS IT?
 
@@ -874,7 +836,9 @@ Agents in the FTC model come in three categories:
 
 The main difference between the Guide and other pedestrians is that the former is expected to move in a relatively consistent manner from a point A to a point B, while the latter could have all sorts of behaviors, including staying in place.
 
-Pedestrian and guide motion is simulated by replaying person tracks generated from the [ATC pedestrian tracking dataset](https://dil.atr.jp/crest2010_HRI/ATC_dataset/). Each track is a sequence of timestamped and ID'd position records representing the motion of a single person through the ATC shopping center. Specific tracks are selected to play the role of guide, and stored in CSV files alongside all other person tracks that span the same time period.
+Pedestrian and guide motion is simulated by replaying person tracks generated from the [ATC pedestrian tracking dataset](https://dil.atr.jp/crest2010_HRI/ATC_dataset/). Each track is a sequence of timestamped and ID'd position records representing the motion of a single person through the ATC shopping center. When a track is selected as a guide, all (sections of) the tracks spanning the same time period are also loaded to play the role of pedestrians. Tracks are stored in [SQLite](https://www.sqlite.org/) database files to allow for fast seeking through the data.
+
+Tracks are ranked by _reach,_ defined for a track `t = [p_0, p_1, ..., p_n]` as `max(distance(p_0, p_k) for p_k in t)`. This is a better measure for selecting guide tracks than duration in time, or even the sum of offsets between locations, since those values can be high for tracks where the person just wobbles around the same location for a long time.
 
 Wheelchair motion is determined by the application of a formation control algorithm. At present the FCT model provides two options:
 
@@ -887,9 +851,11 @@ Additional algorithms, including the MRFC algorithm that initially motivated the
 
 On the top-left corner of the interface there are widgets for controlling basic agent features:
 
-* `all-tracks?` indicates whether all track CSV files will be played in sequence or a single one selected for playing --- in the latter case a file opening dialog will be shown for selecting the CSV file;
+* `all-tracks?` indicates whether all SQLite database files will be played in sequence or a single one selected for playing --- in the latter case a file opening dialog will be shown for selecting the file;
 * `method` specifies the leader-following algorithm used by the wheelchairs;
 * `wheelchair-count` determines the number of simulated wheelchairs in the convoy.
+* `min-reach` specifies the shortest a track can be in reach to be selected as a guide;
+* `max-reach` specifies the longest a track can be in reach to be selected as a guide.
 
 On the bottom-left corner there are widgets to configure the `APF` leader-following algorithm (these are all ignored when the `naive` algorithm is selected):
 
@@ -912,7 +878,7 @@ Links are used to bind each wheelchair to its leader. This makes it easier to id
 
 Wheelchairs are initially placed in a straight line behind the guide, one meter apart from each other. If a collision is detected at this point the wheelchairs are deleted and re-instantiated at the next iteration, after the guide has moved to its next position. This is repeated until the wheelchairs can be placed in their initial positions without collision. Additionally, if a collision is detected while the wheelchairs are moving, the convoy is also deleted and re-instantiated as above. The point of this procedure is to avoid spamming the collision count when wheelchairs get stuck into walls or chased by pedestrians.
 
-During execution, per-guide collision totals are written to the report file `collisions-<method>.csv`. These files are re-created before each session.
+During execution, per-guide collision totals are written to a database file `collisions-<method>-<timestamp>.db`. These files are re-created before each session.
 
 ## THINGS TO TRY
 
@@ -934,9 +900,7 @@ Instead of one convoy at a time, multiple convoys could be simultaneously simula
 
 The model uses anonymous functions to dynamically bind the leader-following method during model setup. This is more efficient than checking the value of the `method` widget at every iteration, but has the side effect that the method cannot be changed while the model is running. In practice this shouldn't be much of a problem, since for testing purposes it makes little sense to change algorithms in the middle of a session.
 
-The [csv extension](https://ccl.northwestern.edu/netlogo/docs/csv.html) is used to read track files and write collision reports.
-
-A previous version of this model used the [pathdir extension](https://github.com/cstaelin/Pathdir-Extension) to search for track files when the `all-tracks?` switch is on. However that extension is not installed to the NetLogo IDE by default, so in order to streamline the user experience the code was modified to use a pre-generated index file instead.
+Access to SQLite database files is implemented through the Python [sqlite3](https://docs.python.org/3/library/sqlite3.html) package and integrated to the FTC model through the [Py extension](https://ccl.northwestern.edu/netlogo/docs/py.html). Both the extension and a Python runtime must be installed for the model to work.
 
 ## RELATED MODELS
 

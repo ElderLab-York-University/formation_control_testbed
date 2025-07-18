@@ -17,9 +17,11 @@ The Formation Control Testbed (FCT) is a [NetLogo](https://ccl.northwestern.edu/
 
 The identity and location of each wheelchair's leader, the occupancy status of environment cells, and the locations of other pedestrians are all given by the model, which is also responsible for executing the speed commands received from motion planner instances.
 
-Pedestrian motion is simulated by replaying person tracks generated from the [ATC pedestrian tracking dataset](https://dil.atr.jp/crest2010_HRI/ATC_dataset/). Each track is a sequence of timestamped and ID'd position records representing the motion of a single person through the ATC shopping center. Specific tracks are selected to play the role of guide, and stored in CSV files alongside all other person tracks that span the same time period.
+Pedestrian motion is simulated by replaying person tracks generated from the [ATC pedestrian tracking dataset](https://dil.atr.jp/crest2010_HRI/ATC_dataset/). Each track is a sequence of timestamped and ID'd position records representing the motion of a single person through the ATC shopping center. When a track is selected as a guide, all (sections of) the tracks spanning the same time period are also loaded to play the role of pedestrians. Tracks are stored in [SQLite](https://www.sqlite.org/) database files to allow for fast seeking through the data.
 
-At present the FCT model implements two formation control algorithms:
+Tracks are ranked by _reach,_ defined for a track `t = [p_0, p_1, ..., p_n]` as `max(distance(p_0, p_k) for p_k in t)`. This is a better measure for selecting guide tracks than duration in time, or even the sum of offsets between locations, since those values can be high for tracks where the person just wobbles around the same location for a long time.
+
+Wheelchair motion is determined by the application of a formation control algorithm. At present the FCT model implements two formation control algorithms:
 
 * A naive leader-following algorithm with no obstacle avoidance capability;
 * An algorithm based on Artificial Potential Fields (APF).
@@ -32,9 +34,21 @@ Additional algorithms, including the MRFC algorithm that initially motivated the
 2. Install and open [NetLogo](https://ccl.northwestern.edu/netlogo/)
 3. Open file `Formation Control Testbed.nlogo` in the NetLogo IDE.
 
+To generate track databases, download a data archive from the [ATC dataset](https://dil.atr.jp/crest2010_HRI/ATC_dataset/) and extract it to a local filesystem, then run the script below:
+
+    python scripts/create_database.py <path to CSV file>
+
+This will create a SQLite database file as `data/tracks/<CSV file name>.db`.
+
 ## Usage
 
-On the top-left corner of the interface there are widgets for controlling the number of simulated wheelchairs, the leader-following algorithm, and whether to replay all track CSV files in sequence or select a specific one for replaying. In the latter case a file opening dialog will be shown for selecting the CSV file. Some sample files are available inside the folder `data/tracks`.
+On the top-left corner of the interface there are widgets for controlling basic agent features:
+
+* `all-tracks?` indicates whether all SQLite database files will be played in sequence or a single one selected for playing --- in the latter case a file opening dialog will be shown for selecting the file;
+* `method` specifies the leader-following algorithm used by the wheelchairs;
+* `wheelchair-count` determines the number of simulated wheelchairs in the convoy;
+* `min-reach` specifies the shortest a track can be in reach to be selected as a guide;
+* `max-reach` specifies the longest a track can be in reach to be selected as a guide.
 
 On the bottom-left corner there are widgets to configure the `APF` leader-following algorithm (these are all ignored when the `naive` algorithm is selected):
 
