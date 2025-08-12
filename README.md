@@ -30,8 +30,8 @@ Additional algorithms, including the MRFC algorithm that initially motivated the
 
 ## Setup
 
-1. Clone this repository
-2. Install and open [NetLogo](https://ccl.northwestern.edu/netlogo/)
+1. Clone this repository;
+2. Install [NetLogo](https://ccl.northwestern.edu/netlogo/) to the `bin/` folder and open it;
 3. Open file `Formation Control Testbed.nlogo` in the NetLogo IDE.
 
 To generate track databases, download a data archive from the [ATC dataset](https://dil.atr.jp/crest2010_HRI/ATC_dataset/) and extract it to a local filesystem, then run the script below:
