@@ -48,6 +48,9 @@ globals [
   ;; Time passed since the start of the simulation in seconds.
   t_passed
 
+  ;; Path to the map image.
+  path-map
+
   ;; Map resolution in meters.
   map-resolution
 
@@ -64,9 +67,6 @@ globals [
 
   ;; Total collisions across all guides.
   all-collisions
-
-  ;; Anonymous function used to update convoy wheelchairs.
-  update-convoy-method
 ]
 
 breed [pedestrians pedestrian]
@@ -74,6 +74,10 @@ breed [pedestrians pedestrian]
 pedestrians-own [
   ;; Pedestrian's track ID.
   id
+
+  ;; Pedestrian position in the map coordinate frame, in meters.
+  x-coordinate
+  y-coordinate
 ]
 
 breed [guides guide]
@@ -110,6 +114,9 @@ wheelchairs-own [
   ;; Timestamp of the last state update.
   t
 
+  ;; ID of the convoy to which this wheelchair belongs.
+  convoy-id
+
   ;; Wheelchair position in the map coordinate frame, in meters.
   x-coordinate
   y-coordinate
@@ -126,17 +133,57 @@ wheelchairs-own [
   angular-speed
 ]
 
+to reset-settings
+  set settings (ifelse-value
+    method = "Naive" [
+      "separation: 1.0"
+    ]
+    method = "APF" [
+      (word
+        "separation: 1.0\n"
+        "attraction_gain: 0.1\n"
+        "repulsion_gain: 0.2"
+      )
+    ]
+    [ ;; method = MRFC
+      (word
+        "separation: 1.0\n"
+        "path: \"" path-map "\"\n"
+        "origin: [" map-x0 ", " map-y0 "]\n"
+        "resolution: " map-resolution "\n"
+        "obstacle_weight: 2.0\n"
+        "obstacle_deviation: 1.0"
+      )
+    ]
+  )
+end
+
 ;; Initialize the simulation.
 to setup
-  clear-all
-  file-close-all
-
   py:setup py:python3
-  py:run "from fct import datasets"
+  file-close-all
+  clear-all
+
+  ;; TODO: Load map parameters from file.
+  set path-map "data/map.png"
+  set map-resolution 0.1
+  set map-x0 -60.0
+  set map-y0 -40.0
+
+  py:set "path_map" path-map
+  py:set "origin" (list map-x0 map-y0)
+  py:set "resolution" map-resolution
+
   py:set "folder" "data/tracks"
   py:set "method" method
   py:set "reach" (list min-reach max-reach)
-  py:run "datasets.update(folder, method, reach)"
+
+  (py:run
+    "from fct import datasets"
+    "from fct.convoy import Convoy"
+    "datasets.update(folder, method, reach)"
+    "convoy = Convoy()"
+  )
 
   ifelse all-tracks? [
     py:run "datasets.enqueue(folder)"
@@ -151,20 +198,8 @@ to setup
     py:run "datasets.open(path_dataset)"
   ]
 
-  ;; TODO: Load map parameters from file.
-  set map-resolution 0.1
-  set map-x0 -60.0
-  set map-y0 -40.0
-
   ;; Import the occupancy map.
-  import-pcolors "data/map.png"
-
-  set update-convoy-method (ifelse-value
-    method = "naive"
-      [[[convoy-guide] -> update-convoy-naive convoy-guide]]
-    ; method = "APF"
-      [[[convoy-guide] -> update-convoy-apf convoy-guide]]
-  )
+  import-pcolors path-map
 
   set clock false
   set all-collisions 0
@@ -198,6 +233,9 @@ to iterate
     ask turtles [
       die
     ]
+
+    ;; Delete all wheelchair controllers.
+    py:run "convoy.clear()"
 
     stop
   ]
@@ -293,30 +331,48 @@ to update-convoy [convoy-guide]
     create-convoy convoy-guide
   ]
 
-  ;; If the convoy is clear, update wheelchair poses.
-  if not collision? convoy-guide [
-    (run update-convoy-method convoy-guide)
-    update-collision-count convoy-guide
-    stop
-  ]
-
-  ;; If a collision was detected before the update, delete the convoy.
-  ;; This prevents spamming the collision count when wheelchairs get stuck.
-  ;; The convoy will be re-created after the guide moves to its next pose.
-  let follower (one-of [out-link-neighbors] of convoy-guide)
-  loop [
-    ;; Links are removed as soon as the turtle on either side dies, so we
-    ;; have to find the next wheelchair before removing the current one.
-    let following follower
-    set follower (one-of [out-link-neighbors] of following)
-
-    ask following [
+  ;; If a collision is detected before the update...
+  if collision? convoy-guide [
+    ;; Delete then convoy.
+    ask wheelchairs with [convoy-id = [who] of convoy-guide] [
       die
     ]
 
+    ;; Delete all wheelchair controllers.
+    py:run "convoy.clear()"
+
+    stop
+  ]
+
+  ;; Otherwise, update wheelchair poses.
+  let target convoy-guide
+  loop [
+    ;; This assumes that any guide / wheelchair has at most one follower.
+    let follower (one-of [out-link-neighbors] of target)
     if follower = nobody [
+      update-collision-count convoy-guide
       stop
     ]
+
+    let obstacles []
+
+    ask [other turtles in-radius (sensor-range / map-resolution)] of follower [
+      set obstacles (fput (list x-coordinate y-coordinate) obstacles)
+    ]
+
+    ask [patches in-radius (sensor-range / map-resolution) with [pcolor = 0]] of follower [
+      set obstacles (fput (to-map pxcor pycor) obstacles)
+    ]
+
+    py:set "id" [who] of follower
+    py:set "target" (get-state target)
+    py:set "obstacles" obstacles
+    py:set "sensor_range" sensor-range
+
+    set-state follower (py:runresult "convoy.update(id, target, obstacles, sensor_range)")
+
+    ;; Update the target for the next loop iteration.
+    set target follower
   ]
 end
 
@@ -325,6 +381,8 @@ to create-convoy [convoy-guide]
   let target convoy-guide
 
   create-wheelchairs wheelchair-count [
+    set convoy-id [who] of convoy-guide
+
     set color green
     set size 10
 
@@ -333,11 +391,12 @@ to create-convoy [convoy-guide]
       set thickness 2
     ]
 
-    ;; Set wheelchair position and heading to sensible start values.
-    ;; This will be overwritten by the update function after all wheelchairs are created.
-    set heading ([heading] of target)
-    set xcor ([xcor] of target) - (1.0 / map-resolution) * (sin heading)
-    set ycor ([ycor] of target) - (1.0 / map-resolution) * (cos heading)
+    ;; Initialize the wheelchair's controller and its state in the simulation.
+    py:set "id" who
+    py:set "method" method
+    py:set "target" (get-state target)
+    py:set "settings" settings
+    set-state self (py:runresult "convoy.add(id, method, target, settings)")
 
     ;; Set this wheelchair as the target for the next one.
     set target self
@@ -374,137 +433,23 @@ end
 
 ;; Update collision counts for the given guide's convoy.
 to update-collision-count [convoy-guide]
-  let target convoy-guide
-  loop [
-    ;; This assumes that any guide / wheelchair has at most one follower.
-    let follower (one-of [out-link-neighbors] of target)
-    if follower = nobody [
-      stop
+  ask wheelchairs with [convoy-id = [who] of convoy-guide] [
+    if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
+      set all-collisions (all-collisions + 1)
+      set obstacle-collisions (obstacle-collisions + 1)
+      ask convoy-guide [
+        set collisions (collisions + 1)
+      ]
     ]
 
-    ask follower [
-      if any? patches in-radius (collision-threshold / map-resolution) with [pcolor = 0] [
-        set all-collisions (all-collisions + 1)
-        set obstacle-collisions (obstacle-collisions + 1)
-        ask convoy-guide [
-          set collisions (collisions + 1)
-        ]
+    if any? other turtles in-radius (collision-threshold / map-resolution) [
+      set all-collisions (all-collisions + 1)
+      set pedestrian-collisions (pedestrian-collisions + 1)
+      ask convoy-guide [
+        set collisions (collisions + 1)
       ]
-
-      if any? other turtles in-radius (collision-threshold / map-resolution) [
-        set all-collisions (all-collisions + 1)
-        set pedestrian-collisions (pedestrian-collisions + 1)
-        ask convoy-guide [
-          set collisions (collisions + 1)
-        ]
-      ]
-
-      ;; Set this wheelchair as the search key for the next one.
-      set target self
     ]
   ]
-end
-
-;; Update the position of the wheelchairs using a naive algorithm.
-;; The wheelchairs simply follow the guide without avoiding anything in their way.
-to update-convoy-naive [convoy-guide]
-  let target convoy-guide
-  loop [
-    ;; This assumes that any guide / wheelchair has at most one follower.
-    let follower (one-of [out-link-neighbors] of target)
-    if follower = nobody [
-      stop
-    ]
-
-    ask follower [
-      let target-xcor ([xcor] of target)
-      let target-ycor ([ycor] of target)
-
-      let xcor-offset target-xcor - xcor
-      let ycor-offset target-ycor - ycor
-
-      set heading atan xcor-offset ycor-offset
-
-      ;; Revert sin / cos since heading's origin is Up instead of Right.
-      set xcor target-xcor - (1.0 / map-resolution) * (sin heading)
-      set ycor target-ycor - (1.0 / map-resolution) * (cos heading)
-
-      ;; Set this wheelchair as the search key for the next one.
-      set target self
-    ]
-  ]
-end
-
-;; Update the position of the wheelchairs using Artificial Potential Fields (APF) to avoid obstacles.
-to update-convoy-apf [convoy-guide]
-  let target convoy-guide
-  loop [
-    ;; This assumes that any guide / wheelchair has at most one follower.
-    let follower (one-of [out-link-neighbors] of target)
-    if follower = nobody [
-      stop
-    ]
-
-    ask follower [
-      let target-xcor ([xcor] of target)
-      let target-ycor ([ycor] of target)
-      let vector (attraction-vector target-xcor target-ycor)
-
-      let wheelchair-x ([xcor] of self)
-      let wheelchair-y ([ycor] of self)
-
-      let nearby (other turtles in-radius (sensor-range / map-resolution))
-      ask nearby [
-        set vector (map + vector (repulsion-vector wheelchair-x wheelchair-y xcor ycor))
-      ]
-
-      let neighborhood (patches in-radius (sensor-range / map-resolution) with [pcolor = 0])
-      ask neighborhood [
-        set vector (map + vector (repulsion-vector wheelchair-x wheelchair-y pxcor pycor))
-      ]
-
-      let scale (sensor-range / map-resolution) / (1 + (count neighborhood) + (count nearby))
-
-      let xcor-offset (item 0 vector) * scale
-      let ycor-offset (item 1 vector) * scale
-
-      set heading atan xcor-offset ycor-offset
-
-      ;; Revert sin / cos since heading's origin is Up instead of Right.
-      carefully [
-        setxy (xcor + xcor-offset) (ycor + ycor-offset)
-      ] [
-        ;; Nothing to do.
-      ]
-
-      ;; Set this wheelchair as the search key for the next one.
-      set target self
-    ]
-  ]
-end
-
-;; Compute the attraction vector leading a wheelchair to its target.
-to-report attraction-vector [target-xcor target-ycor]
-  ;; Normalize vector by sensor range.
-  let x (target-xcor - xcor) * (map-resolution / sensor-range)
-  let y (target-ycor - ycor) * (map-resolution / sensor-range)
-  let d (sqrt (x ^ 2 + y ^ 2))
-
-  let f attraction-gain * d
-
-  report (list (x * f) (y * f))
-end
-
-;; Compute the repulsion vector leading a wheelchair away from an obstacle.
-to-report repulsion-vector [wheelchair-x wheelchair-y obstacle-x obstacle-y]
-  ;; Normalize vector by sensor range.
-  let x (wheelchair-x - obstacle-x) * (map-resolution / sensor-range)
-  let y (wheelchair-y - obstacle-y) * (map-resolution / sensor-range)
-  let d (sqrt (x ^ 2 + y ^ 2))
-
-  let f repulsion-gain * ((1.0 / d) - 1.0) / (d ^ 3)
-
-  report (list (x * f) (y * f))
 end
 
 ;; Iterate a simulated pedestrian.
@@ -526,9 +471,55 @@ to iterate-pedestrian [row]
   ]
 
   ask iterating [
+    set x-coordinate track-x
+    set y-coordinate track-y
+
     setxy (to-world-x track-x) (to-world-y track-y)
     set heading to-heading track-o
   ]
+end
+
+;; Return the state of the given agent.
+to-report get-state [agent]
+  report (list
+    [x-coordinate] of agent
+    [y-coordinate] of agent
+    [orientation] of agent
+    [linear-speed] of agent
+    [angular-speed] of agent
+  )
+end
+
+;; Set the state of the given agent
+to set-state [agent state]
+  ask agent [
+    set x-coordinate (item 0 state)
+    set y-coordinate (item 1 state)
+    set orientation (item 2 state)
+    set linear-speed (item 3 state)
+    set angular-speed (item 4 state)
+
+    ;; Update the simulation state.
+    carefully [
+      setxy (to-world-x x-coordinate) (to-world-y y-coordinate)
+      set heading (to-heading orientation)
+    ] [
+      ;; Nothing to do.
+    ]
+  ]
+end
+
+;; Convert the given world coordinates to the map reference frame.
+to-report to-map [world-x world-y]
+  report (list
+    (to-map-coordinate world-x map-x0)
+    (to-map-coordinate world-y map-y0)
+  )
+end
+
+;; Convert the given world coordinate to the map frame of reference.
+to-report to-map-coordinate [world-k map-k0]
+  report world-k * map-resolution + map-k0
 end
 
 ;; Convert the given map X coordinate to the NetLogo world frame of reference.
@@ -580,8 +571,8 @@ GRAPHICS-WINDOW
 1400
 0
 600
-1
-1
+0
+0
 1
 ticks
 30.0
@@ -655,9 +646,9 @@ HORIZONTAL
 
 SLIDER
 10
-360
+280
 195
-393
+313
 collision-threshold
 collision-threshold
 0.1
@@ -690,9 +681,9 @@ PENS
 
 SLIDER
 10
-320
+240
 195
-353
+273
 sensor-range
 sensor-range
 0.1
@@ -703,36 +694,6 @@ sensor-range
 m
 HORIZONTAL
 
-SLIDER
-10
-440
-195
-473
-repulsion-gain
-repulsion-gain
-0.1
-10
-0.2
-0.1
-1
-NIL
-HORIZONTAL
-
-SLIDER
-10
-400
-195
-433
-attraction-gain
-attraction-gain
-0.1
-10.0
-0.1
-0.1
-1
-NIL
-HORIZONTAL
-
 CHOOSER
 10
 70
@@ -740,8 +701,8 @@ CHOOSER
 115
 method
 method
-"naive" "APF"
-0
+"Naive" "APF" "MRFC"
+1
 
 SWITCH
 10
@@ -805,6 +766,34 @@ max-reach
 1
 m
 HORIZONTAL
+
+INPUTBOX
+10
+320
+277
+431
+settings
+separation: 1.0\nattraction_gain: 0.1\nrepulsion_gain: 0.2
+1
+1
+String
+
+BUTTON
+172
+320
+227
+353
+Reset
+reset-settings
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
 
 @#$#@#$#@
 ## WHAT IS IT?
