@@ -41,13 +41,19 @@ r'''Controllers and support artifacts used in simulation.
 
 import yaml
 from itertools import product
-from math import atan2, sin, cos, pi
+from math import atan2, copysign, sin, cos, pi
 
 import cv2 as cv
 import numpy as np
 
 
 RAD_TO_DEG = 180.0 / pi
+
+
+def normalizeAngle(o):
+    r'''Normalize a given angle to the range `[-pi, pi)`.
+    '''
+    return copysign(abs(o) % pi, o)
 
 
 class Convoy:
@@ -72,25 +78,53 @@ class Convoy:
         '''
         self.__convoy.clear()
 
-    def update(self, id, target, obstacles, sensor_range):
+    def update(self, id, dt, target, obstacles, sensor_range):
         r'''Update the controller of the wheelchair by the given ID.
         '''
         controller = self.__convoy[id]
-        controller.update(target, obstacles, sensor_range)
+        controller.update(dt, target, obstacles, sensor_range)
         return controller.state
 
 
 class Controller:
     r'''Base controller class.
     '''
-    def __init__(self, x, y, o, v, w):
-        r'''Create a controller with the given initial state.
+    def __init__(self, target, settings):
+        r'''Create a controller for a robot lined up behind the given target.
         '''
-        self.x = x
-        self.y = y
+        separation = settings.get('separation', 1.0)
+        (x, y, o) = target[:3]
+
+        self.x = x - separation * cos(o)
+        self.y = y - separation * sin(o)
         self.o = o
-        self.v = v
-        self.w = w
+        self.v = 0.0
+        self.w = 0.0
+
+    def iterate(self, dt):
+        r'''Update the robot's pose based on current orientation and linear / angular speeds.
+        '''
+        o = self.o
+        v = self.v
+        w = self.w
+
+        cos_o = cos(o)
+        sin_o = sin(o)
+        wdt = w * dt
+
+        if abs(w) > 1e-4:
+            r = v / w
+
+            cos_wdt = cos(wdt)
+            sin_wdt = sin(wdt)
+
+            self.x += r * (cos_wdt * sin_o + cos_o * sin_wdt - sin_o)
+            self.y += r * (sin_wdt * sin_o - cos_o * cos_wdt + cos_o)
+            self.o = normalizeAngle(o + wdt)
+        else:
+            s = v * dt
+            self.x += s * cos_o
+            self.y += s * sin_o
 
     @property
     def state(self):
@@ -111,30 +145,29 @@ class Naive(Controller):
     def __init__(self, target, settings):
         r'''Create a new naive controller trailing the given target.
         '''
-        separation = settings['separation']
-        self.__separation = separation
-        (x, y, o, v, w) = target
-        super().__init__(
-            x - separation * cos(o),
-            y - separation * sin(o),
-            o,
-            v,
-            w
-        )
+        super().__init__(target, settings)
+        self.__separation = settings.get('separation', 1.0)
 
-    def update(self, target, obstacles, sensor_range):
+    def update(self, dt, target, obstacles, sensor_range):
         r'''Update the state of the controller from the state of the given target.
         '''
-        x = target[0]
-        y = target[1]
-        o = atan2(y - self.y, x - self.x)
-        s = self.__separation
+        self.iterate(dt)
 
-        self.x = x - s * cos(o)
-        self.y = y - s * sin(o)
-        self.o = o
-        self.v = target[3]
-        self.w = target[4]
+        # Update the robot's linear and angular speeds to track its leader.
+
+        (x, y) = target[:2]
+        o = atan2(y - self.y, x - self.x)
+        w = (o - self.o) / dt
+
+        a = np.array([self.x, self.y])
+
+        s = self.__separation
+        b = np.array([x - s * cos(o), y - s * sin(o)])
+
+        v = max(0.0, np.linalg.norm(b - a) / dt)
+
+        self.v = v
+        self.w = w
 
 
 class APF(Controller):
@@ -143,18 +176,9 @@ class APF(Controller):
     def __init__(self, target, settings):
         r'''Create a new naive controller trailing the given target.
         '''
+        super().__init__(target, settings)
         self.__gain_attraction = settings.get('attraction_gain', 0.1)
         self.__gain_repulsion = settings.get('repulsion_gain', 0.2)
-
-        separation = settings.get('separation', 1.0)
-        (x, y, o, v, w) = target
-        super().__init__(
-            x - separation * cos(o),
-            y - separation * sin(o),
-            o,
-            v,
-            w
-        )
 
     def __attract(self, target, sensor_range):
         r'''Compute the attraction vector towards the given target.
@@ -172,22 +196,28 @@ class APF(Controller):
 
         return v * (self.__gain_repulsion * ((sensor_range / d) - 1.0) / (d ** 3))
 
-    def update(self, target, obstacles, sensor_range):
+    def update(self, dt, target, obstacles, sensor_range):
         r'''Update the state of the controller from the state of the given target.
         '''
+        self.iterate(dt)
+
         vector = self.__attract(np.array(target[:2]), sensor_range)
 
         for obstacle in obstacles:
             vector += self.__repulse(np.array(obstacle), sensor_range)
 
         vector *= sensor_range / (1.0 + len(obstacles))
-        (x, y) = vector
+        (dx, dy) = vector
 
-        self.x += x
-        self.y += y
-        self.o = atan2(y, x)
-        self.v = target[3]
-        self.w = target[4]
+        a = np.array([self.x, self.y])
+        b = np.array([self.x + dx, self.y + dy])
+        v = max(0.0, np.linalg.norm(b - a) / dt)
+
+        o = atan2(dy, dx)
+        w = (o - self.o) / dt
+
+        self.v = v
+        self.w = w
 
 
 class ProximityMap:

@@ -84,7 +84,7 @@ breed [guides guide]
 
 guides-own [
   ;; Timestamp of the last guide state update.
-  t
+  timestamp
 
   ;; Guide's track ID.
   id
@@ -111,9 +111,6 @@ guides-own [
 breed [wheelchairs wheelchair]
 
 wheelchairs-own [
-  ;; Timestamp of the last state update.
-  t
-
   ;; ID of the convoy to which this wheelchair belongs.
   convoy-id
 
@@ -294,13 +291,16 @@ to iterate-guide [row]
       update-guide row
       pen-down
     ]
+
+    create-convoy convoy-guide
   ] [
+    let dt clock - [timestamp] of convoy-guide
     ask convoy-guide [
       update-guide row
     ]
-  ]
 
-  update-convoy convoy-guide
+    update-convoy dt convoy-guide
+  ]
 end
 
 ;; Set the state of a guide.
@@ -310,11 +310,11 @@ to update-guide [row]
   let track-v (item 4 row)
   let track-o (item 5 row)
 
-  if t != 0 [
-    set angular-speed (track-o - orientation) / (clock - t)
+  if timestamp != 0 [
+    set angular-speed (track-o - orientation) / (clock - timestamp)
   ]
 
-  set t clock
+  set timestamp clock
   set x-coordinate track-x
   set y-coordinate track-y
   set orientation track-o
@@ -325,7 +325,7 @@ to update-guide [row]
 end
 
 ;; Update the state of the simulated wheelchair convoy.
-to update-convoy [convoy-guide]
+to update-convoy [dt convoy-guide]
   ;; If there is no convoy associated to this guide, create it.
   if not any? [out-link-neighbors] of convoy-guide [
     create-convoy convoy-guide
@@ -365,11 +365,12 @@ to update-convoy [convoy-guide]
     ]
 
     py:set "id" [who] of follower
+    py:set "dt" dt
     py:set "target" (get-state target)
     py:set "obstacles" obstacles
     py:set "sensor_range" sensor-range
 
-    set-state follower (py:runresult "convoy.update(id, target, obstacles, sensor_range)")
+    set-state follower (py:runresult "convoy.update(id, dt, target, obstacles, sensor_range)")
 
     ;; Update the target for the next loop iteration.
     set target follower
@@ -702,7 +703,7 @@ CHOOSER
 method
 method
 "Naive" "APF" "MRFC"
-1
+0
 
 SWITCH
 10
@@ -773,7 +774,7 @@ INPUTBOX
 277
 431
 settings
-separation: 1.0\nattraction_gain: 0.1\nrepulsion_gain: 0.2
+separation: 1.0
 1
 1
 String
