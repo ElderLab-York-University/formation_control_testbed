@@ -41,19 +41,47 @@ r'''Controllers and support artifacts used in simulation.
 
 import yaml
 from itertools import product
-from math import atan2, copysign, sin, cos, pi
+from math import atan2, copysign, inf, isfinite, sin, cos, pi
+from traceback import format_exc
 
 import cv2 as cv
+import nlopt as nl
 import numpy as np
 
 
-RAD_TO_DEG = 180.0 / pi
+def distance(a, b):
+    r'''Return the Euclidean distance between two vectors.
+    '''
+    return np.linalg.norm(a - b)
 
 
 def normalizeAngle(o):
     r'''Normalize a given angle to the range `[-pi, pi)`.
     '''
-    return copysign(abs(o) % pi, o)
+    o = (o + pi) % (2 * pi)
+    if o < 0.0:
+        o += 2.0 * pi
+
+    return o - pi
+
+
+def toLocalFrame(pose, positions):
+    r'''Convert the given positions to the local frame of the given pose.
+    '''
+    (x, y, o) = pose
+    shift = np.array([x, y])
+    rotation = np.array([ # Rotate points clockwise.
+        [cos(o), -sin(o)],
+        [sin(o), cos(o)]
+    ])
+
+    return (positions - shift) @ rotation
+
+
+def truncate(x, a, b):
+    r'''Truncate the value `x` to the range `[a, b]`.
+    '''
+    return max(a, min(x, b))
 
 
 class Convoy:
@@ -78,12 +106,16 @@ class Convoy:
         '''
         self.__convoy.clear()
 
-    def update(self, id, dt, target, obstacles, sensor_range):
+    def update(self, id, dt, target, obstacles):
         r'''Update the controller of the wheelchair by the given ID.
         '''
-        controller = self.__convoy[id]
-        controller.update(dt, target, obstacles, sensor_range)
-        return controller.state
+        try:
+            controller = self.__convoy[id]
+            controller.update(dt, target, obstacles)
+            return controller.state
+        except Exception as e:
+            print(format_exc())
+            raise e
 
 
 class Controller:
@@ -92,11 +124,13 @@ class Controller:
     def __init__(self, target, settings):
         r'''Create a controller for a robot lined up behind the given target.
         '''
-        separation = settings.get('separation', 1.0)
+        self.sensor_range = settings.get('sensor_range', 1.0)
+        self.separation = settings.get('separation', 1.0)
+
         (x, y, o) = target[:3]
 
-        self.x = x - separation * cos(o)
-        self.y = y - separation * sin(o)
+        self.x = x - self.separation * cos(o)
+        self.y = y - self.separation * sin(o)
         self.o = o
         self.v = 0.0
         self.w = 0.0
@@ -127,6 +161,16 @@ class Controller:
             self.y += s * sin_o
 
     @property
+    def pose(self):
+        r'''Return the robot pose as a tuple.
+        '''
+        return (
+            self.x,
+            self.y,
+            self.o
+        )
+
+    @property
     def state(self):
         r'''Return the controller state as a tuple.
         '''
@@ -146,9 +190,8 @@ class Naive(Controller):
         r'''Create a new naive controller trailing the given target.
         '''
         super().__init__(target, settings)
-        self.__separation = settings.get('separation', 1.0)
 
-    def update(self, dt, target, obstacles, sensor_range):
+    def update(self, dt, target, obstacles):
         r'''Update the state of the controller from the state of the given target.
         '''
         self.iterate(dt)
@@ -161,10 +204,10 @@ class Naive(Controller):
 
         a = np.array([self.x, self.y])
 
-        s = self.__separation
+        s = self.separation
         b = np.array([x - s * cos(o), y - s * sin(o)])
 
-        v = max(0.0, np.linalg.norm(b - a) / dt)
+        v = distance(a, b) / dt
 
         self.v = v
         self.w = w
@@ -180,38 +223,38 @@ class APF(Controller):
         self.__gain_attraction = settings.get('attraction_gain', 0.1)
         self.__gain_repulsion = settings.get('repulsion_gain', 0.2)
 
-    def __attract(self, target, sensor_range):
+    def __attract(self, target):
         r'''Compute the attraction vector towards the given target.
         '''
-        v = (target - np.array([self.x, self.y])) / sensor_range
+        v = (target - np.array([self.x, self.y])) / self.sensor_range
         d = np.linalg.norm(v)
 
         return v * (self.__gain_attraction * d)
 
-    def __repulse(self, obstacle, sensor_range):
+    def __repulse(self, obstacle):
         r'''Compute the attraction vector towards the given obstacle.
         '''
-        v = (np.array([self.x, self.y]) - obstacle) / sensor_range
+        v = (np.array([self.x, self.y]) - obstacle) / self.sensor_range
         d = np.linalg.norm(v)
 
-        return v * (self.__gain_repulsion * ((sensor_range / d) - 1.0) / (d ** 3))
+        return v * (self.__gain_repulsion * ((self.sensor_range / d) - 1.0) / (d ** 3))
 
-    def update(self, dt, target, obstacles, sensor_range):
+    def update(self, dt, target, obstacles):
         r'''Update the state of the controller from the state of the given target.
         '''
         self.iterate(dt)
 
-        vector = self.__attract(np.array(target[:2]), sensor_range)
+        vector = self.__attract(np.array(target[:2]))
 
         for obstacle in obstacles:
-            vector += self.__repulse(np.array(obstacle), sensor_range)
+            vector += self.__repulse(np.array(obstacle))
 
-        vector *= sensor_range / (1.0 + len(obstacles))
+        vector *= self.sensor_range / (1.0 + len(obstacles))
         (dx, dy) = vector
 
         a = np.array([self.x, self.y])
         b = np.array([self.x + dx, self.y + dy])
-        v = max(0.0, np.linalg.norm(b - a) / dt)
+        v = distance(a, b) / dt
 
         o = atan2(dy, dx)
         w = (o - self.o) / dt
@@ -223,20 +266,45 @@ class APF(Controller):
 class ProximityMap:
     r'''Map of the environment where the robots are moving.
     '''
-    def __init__(self, path, origin, resolution=0.1, obstacle_weight=2.0, obstacle_deviation=1.0):
-        r'''Instantiate a map from the given file.
+    def __init__(self, settings):
+        r'''Instantiate a proximity map.
         '''
-        obstacle_variance = 1.0 / (obstacle_deviation ** 2.0)
+        self.resolution = settings.get('resolution', 0.1)
+        self.obstacle_weight = settings.get('obstacle_weight', 2.0)
+        self.obstacle_deviation = settings.get('obstacle_deviation', 1.0)
+        self.sensor_range = settings.get('sensor_range', 1.0)
+        self.target_radius = settings.get('target_radius', 1.0)
 
-        occupancy_map = cv.imread(path, cv.IMREAD_GRAYSCALE)
-        proximity_map = np.zeros(occupancy_map.shape, dtype=float)
+        self.__obstacle_variance = 1.0 / (self.obstacle_deviation ** 2.0)
+        self.__reach = round(self.sensor_range / self.resolution)
+
+        self.__map = None
+
+    def update(self, pose, target_position, obstacles):
+        r'''Update the proximity map.
+        '''
+        reach = self.__reach
+        m = 1 + 2 * reach
+        n = 1 + reach
+
+        proximity_map = np.zeros((m, n), dtype=float)
+
+        if not obstacles:
+            return
+
+        obstacles = np.array(obstacles)
+        obstacle_cells = np.round(toLocalFrame(pose, obstacles) / self.resolution).astype(int)
+        obstacle_weight = self.obstacle_weight
 
         cells = dict()
-        (m, n) = occupancy_map.shape
-        for ((i, j), value) in zip(product(range(m), range(n)), occupancy_map.flat):
-            if value == 1:
-                cells[i, j] = (0.0, 0.0)
+        for (obstacle, (j, i)) in zip(obstacles, obstacle_cells):
+            if distance(target_position, obstacle) <= self.target_radius:
+                continue
+
+            i += reach
+            if (0 <= i < m) and (0 <= j < n):
                 proximity_map[i, j] = obstacle_weight
+                cells[i, j] = (0.0, 0.0)
 
         while cells:
             neighbors = dict()
@@ -246,15 +314,15 @@ class ProximityMap:
                     if i_k < 0 or i_k >= m:
                         continue
 
-                    y_k = y + i_s * resolution
+                    y_k = y + i_s * self.resolution
 
                     for j_s in range(-1, 2, 1 if i_s != 0 else 2):
                         j_k = j + j_s;
                         if j_k < 0 or j_k >= n:
                             continue
 
-                        x_k = x + j_s * resolution
-                        r_k = obstacle_weight / (1.0 + obstacle_variance * (x_k ** 2 + y_k ** 2))
+                        x_k = x + j_s * self.resolution
+                        r_k = obstacle_weight / (1.0 + self.__obstacle_variance * (x_k ** 2 + y_k ** 2))
 
                         r = proximity_map[i_k, j_k]
                         if r_k <= r:
@@ -267,38 +335,41 @@ class ProximityMap:
             cells = neighbors
 
         self.__map = proximity_map
-        self.origin = np.array(origin, dtype=float)
-        self.resolution = resolution
 
-    def __call__(self, x, y, o, obstacle_range):
-        r'''Extract a section of the map of dimensions `(1 + 2 * obstacle_range, obstacle_range)`,
-            aligned with the robot's position and orientation.
+    def __call__(self, x, y):
+        r'''Return the obstacle proximity value for the given coordinates in the local reference frame.
         '''
+        if self.__map is None:
+            return 0.0
+
         (m, n) = self.__map.shape
-        position = np.array([x, y], dtype=flloat)
-        center = ((position - self.origin) / self.resolution).astype(int)
-        center[0] = m - center[0] # Map coordinates grow from bottom-left, while matrix' grow from top-left
 
-        rotation = cv.getRotationMatrix2D(center, -o * RAD_TO_DEG, 1.0)
-        rotated = cv.warpAffine(self.__map, rotation, self.__map.shape)
+        i = self.__reach + round(y / self.resolution)
+        if not (0 <= i < m):
+            return 0.0
 
-        (j, i) = center
-        shape = (1 + 2 * obstacle_range, obstacle_range)
-        local_map = np.zeros(shape)
+        j = round(x / self.resolution)
+        if not (0 <= j < n):
+            return 0.0
 
-        rows_g = slice(max(i - obstacle_range, 0), min(i + obstacle_range + 1, m))
-        cols_g = slice(j, min(j + obstacle_range + 1, n))
+        return self.__map[i, j]
 
-        rows_l = slice(
-            0 if i >= obstacle_range else (obstacle_range - i),
-            shape[0] - (i + obstacle_range + 1 - m if (i + obstacle_range) >= m else 0)
-        )
 
-        cols_l = slice(0, shape[1] - (j + obstacle_range + 1 - n if (j + obstacle_range) >= n else 0))
+def curve(x, curvature):
+    r'''Compute the value of the `y` coordinate for the given curve at the `x` coordinate.
+    '''
+    # A curvature of (effectively) zero implies a straight line.
+    if abs(curvature) < 1e-6:
+        return 0.0
 
-        local_map[rows_l, cols_l] = rotated[rows_g, cols_g]
+    r = abs(1.0 / curvature)
 
-        return local_map
+    r2 = r ** 2.0
+    x2 = x ** 2.0
+    if r2 < x2:
+        return inf
+
+    return copysign(r - (r2 - x2) ** 0.5, curvature)
 
 
 class MRFC(Controller):
@@ -307,20 +378,115 @@ class MRFC(Controller):
     def __init__(self, target, settings):
         r'''Create a new MRFC agent.
         '''
-        separation = settings.get('separation', 1.0)
-        (x, y, o, v, w) = target
-        super().__init__(
-            x - separation * cos(o),
-            y - separation * sin(o),
-            o,
-            v,
-            w
-        )
+        super().__init__(target, settings)
 
-        self.__map = ProximityMap(
-            settings['path'],
-            settings['origin'],
-            settings.get('resolution', 0.1),
-            settings.get('obstacle_weight', 2.0),
-            settings.get('obstacle_deviation', 1.0)
-        )
+        self.__distance_gain = settings.get('distance_gain', 0.8)
+        self.__target_closest = self.separation
+        self.__linear_max_speed = settings.get('linear_max_speed', 3.0)
+        self.__angular_max_speed = settings.get('angular_max_speed', 3.0)
+
+        target_distant = settings.get('target_distant', 1.5)
+        self.__linear_gain = (target_distant - self.__target_closest) / self.__linear_max_speed
+        self.__linear_bias = self.__target_closest
+
+        self.__track = list()
+        self.__track_local = list()
+        self.__map = ProximityMap(settings)
+
+        obstacle_deviation = self.__map.obstacle_deviation
+        obstacle_weight = self.__map.obstacle_weight
+        obstacle_threshold = settings.get('obstacle_threshold', 0.5)
+        self.__obstacle_threshold = obstacle_weight / (1.0 + (obstacle_threshold / obstacle_deviation) ** 2.0)
+
+        self.__opt = nl.opt(nl.LN_NELDERMEAD, 1)
+        self.__opt.set_lower_bounds(-1.0 / self.__map.resolution)
+        self.__opt.set_upper_bounds( 1.0 / self.__map.resolution)
+        self.__opt.set_maxtime(1.0 / settings.get('frequency', 20.0))
+        self.__opt.set_min_objective(self.__cost)
+        self.__opt.set_stopval(1e-6)
+
+        self.__curvature = 0.0
+
+    def __cost(self, parameters, gradients):
+        r'''Curvature optimization cost function.
+        '''
+        total_cost = 0.0
+
+        curvature = parameters[0]
+        for position in self.__track_local:
+            x = position[0]
+            y = curve(x, curvature)
+            if isfinite(y):
+                total_cost += self.__map(x, y) + (y - position[1]) ** 2.0
+            else: # Heavily penalize any curve that can't be drawn up to the target.
+                total_cost += self.sensor_range ** 2.0 + self.__map.obstacle_weight
+
+        return total_cost
+
+    def update(self, dt, target, obstacles):
+        r'''Update the state of the controller from the state of the given target and obstacles.
+        '''
+        self.iterate(dt)
+
+        # Add latest position to track as adequate.
+        target_position = np.array(target[:2])
+        if len(self.__track) == 0 or distance(target_position, self.__track[-1]) > self.__map.resolution:
+            self.__track.append(target_position)
+
+        self.__track_local.clear()
+
+        track = self.__track
+        self.__track = list()
+
+        pose = self.pose
+        position = np.array(pose[:2])
+
+        for position_track in track:
+            position_local = toLocalFrame(pose, position_track)
+            if position_local[0] > 0:
+                self.__track.append(position_track)
+                self.__track_local.append(position_local)
+
+        self.__map.update(pose, target_position, obstacles)
+
+        if distance(position, target_position) <= self.__target_closest:
+            self.v = 0.0
+            self.w = 0.0
+            return
+
+        try:
+            optimized = self.__opt.optimize(np.array([self.__curvature]))
+            self.__curvature = optimized[0]
+        except Exception as e:
+            self.v = 0.0
+            self.w = 0.0
+            print(e)
+            return
+
+        # Check if the route is free of obstacles.
+        for x in np.arange(0.0, self.__track_local[-1][0], self.__map.resolution):
+            y = curve(x, self.__curvature)
+            if not isfinite(y):
+                break
+
+            if self.__map(x, y) > self.__obstacle_threshold:
+                self.v = 0.0
+                self.w = 0.0
+                return
+
+        k = self.__distance_gain
+        max_w = self.__angular_max_speed
+
+        v_target = target[3]
+        d_target = distance(position, target_position)
+
+        d_follow = self.__linear_bias + self.__linear_gain * v_target
+        v_follow = truncate(v_target + k * (d_target - d_follow), 0.0, self.__linear_max_speed)
+        w_follow = v_follow * self.__curvature
+
+        if abs(w_follow) > max_w:
+            w_follow = copysign(max_w, w_follow)
+            v_follow = w_follow / self.__curvature
+
+        self.v = v_follow
+        self.w = w_follow

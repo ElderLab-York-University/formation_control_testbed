@@ -145,8 +145,6 @@ to reset-settings
     [ ;; method = MRFC
       (word
         "separation: 1.0\n"
-        "path: \"" path-map "\"\n"
-        "origin: [" map-x0 ", " map-y0 "]\n"
         "resolution: " map-resolution "\n"
         "obstacle_weight: 2.0\n"
         "obstacle_deviation: 1.0"
@@ -208,6 +206,7 @@ end
 to go
   carefully [
     iterate
+    tick
   ] [
     print error-message
     stop
@@ -216,64 +215,61 @@ end
 
 ;; Perform one iteration step in the simulation.
 to iterate
-  let row py:runresult "next(datasets)"
-  if row = nobody [
-    ;; Record the guide's collision count.
-    ask guides [
-      py:set "record" (list id collisions)
-      py:run "datasets.recordCollisions(*record)"
+  loop [
+    let row py:runresult "next(datasets)"
+    if row = nobody [
+      ;; Record the guide's collision count.
+      ask guides [
+        py:set "record" (list id collisions)
+        py:run "datasets.recordCollisions(*record)"
+      ]
+
+      ;; Set up the environment for the next track.
+      set clock false
+
+      ask turtles [
+        die
+      ]
+
+      ;; Delete all wheelchair controllers.
+      py:run "convoy.clear()"
+
+      stop
     ]
 
-    ;; Set up the environment for the next track.
-    set clock false
-
-    ask turtles [
-      die
+    ;; Reset the environment for a new guide.
+    let now (item 0 row)
+    ifelse clock = false [
+      set t_0 now
+      set t_passed 0.0
+      set obstacle-collisions 0
+      set pedestrian-collisions 0
+      clear-all-plots
+      clear-drawing
+    ] [
+      set t_passed (clock - t_0)
     ]
 
-    ;; Delete all wheelchair controllers.
-    py:run "convoy.clear()"
+    ;; Update the simulation clock.
+    set clock now
 
-    stop
-  ]
-
-  ;; Reset the environment for a new guide.
-  let now (item 0 row)
-  ifelse clock = false [
-    set t_0 now
-    set t_passed 0.0
-    set obstacle-collisions 0
-    set pedestrian-collisions 0
-    clear-all-plots
-    clear-drawing
-  ] [
-    set t_passed (clock - t_0)
-  ]
-
-  ;; Update the simulation clock, taking notice if the time changed.
-  let ticked? (clock != now)
-  set clock now
-
-  ;; Iterate a guide or pedestrian depending on the nature of the current track record.
-  let guide? (item 6 row)
-  ifelse guide? [
-    iterate-guide row
-  ] [
-    iterate-pedestrian row
-  ]
-
-  ;; Remove the pedestrian if we reached the end of its track.
-  let track-id (item 1 row)
-  let last? (item 7 row)
-  if last? [
-    ask pedestrians with [id = track-id] [
-      die
+    ;; Iterate a guide or pedestrian depending on the nature of the current track record.
+    let guide? (item 6 row)
+    ifelse guide? [
+      iterate-guide row
+      stop ;; End the iteration after a guide update.
+    ] [
+      iterate-pedestrian row
     ]
-  ]
 
-  ;; Update the tick count only if the simulation clock moved.
-  if ticked? [
-    tick
+    ;; Remove the pedestrian if we reached the end of its track.
+    let track-id (item 1 row)
+    let last? (item 7 row)
+    if last? [
+      ask pedestrians with [id = track-id] [
+        die
+      ]
+    ]
   ]
 end
 
@@ -368,9 +364,8 @@ to update-convoy [dt convoy-guide]
     py:set "dt" dt
     py:set "target" (get-state target)
     py:set "obstacles" obstacles
-    py:set "sensor_range" sensor-range
 
-    set-state follower (py:runresult "convoy.update(id, dt, target, obstacles, sensor_range)")
+    set-state follower (py:runresult "convoy.update(id, dt, target, obstacles)")
 
     ;; Update the target for the next loop iteration.
     set target follower
@@ -396,7 +391,7 @@ to create-convoy [convoy-guide]
     py:set "id" who
     py:set "method" method
     py:set "target" (get-state target)
-    py:set "settings" settings
+    py:set "settings" (word settings "\nsensor_range: " sensor-range)
     set-state self (py:runresult "convoy.add(id, method, target, settings)")
 
     ;; Set this wheelchair as the target for the next one.
@@ -717,17 +712,6 @@ all-tracks?
 -1000
 
 MONITOR
-755
-75
-895
-120
-Guide ID
-guide-id
-17
-1
-11
-
-MONITOR
 717
 129
 897
@@ -786,6 +770,23 @@ BUTTON
 353
 Reset
 reset-settings
+NIL
+1
+T
+OBSERVER
+NIL
+NIL
+NIL
+NIL
+1
+
+BUTTON
+820
+70
+897
+103
+NIL
+iterate
 NIL
 1
 T
